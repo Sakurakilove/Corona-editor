@@ -37,6 +37,8 @@ pub struct UnpackedCrpack {
     /// Optional application declarations, separate from firmware mappings.
     pub quickapp_icons: Vec<QuickappIcon>,
     pub targets: Vec<String>,
+    pub backgrounds: Option<BackgroundsDeclaration>,
+    pub calendar: Option<CalendarDeclaration>,
     /// Original manifest bytes, including unknown fields; output uses the canonical filename.
     pub manifest_bytes: Vec<u8>,
 }
@@ -53,6 +55,150 @@ impl UnpackedCrpack {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum BackgroundSetting {
+    System,
+    Blur,
+    Image { image: String },
+}
+
+impl BackgroundSetting {
+    pub fn is_system(&self) -> bool {
+        matches!(self, Self::System)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundsDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher: Option<BackgroundSetting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_center: Option<BackgroundSetting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<BackgroundSetting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widgets: Option<BackgroundSetting>,
+}
+
+impl BackgroundsDeclaration {
+    pub fn is_empty(&self) -> bool {
+        self.launcher.is_none()
+            && self.control_center.is_none()
+            && self.notifications.is_none()
+            && self.widgets.is_none()
+    }
+
+    pub fn has_active_rules(&self) -> bool {
+        let active = |s: &Option<BackgroundSetting>| {
+            matches!(
+                s,
+                Some(BackgroundSetting::Blur | BackgroundSetting::Image { .. })
+            )
+        };
+        active(&self.launcher)
+            || active(&self.control_center)
+            || active(&self.notifications)
+            || active(&self.widgets)
+    }
+
+    pub fn referenced_images(&self) -> Vec<&str> {
+        let mut images = Vec::new();
+        for setting in [
+            &self.launcher,
+            &self.control_center,
+            &self.notifications,
+            &self.widgets,
+        ] {
+            if let Some(BackgroundSetting::Image { image }) = setting {
+                images.push(image.as_str());
+            }
+        }
+        images
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarAlign {
+    #[default]
+    TopMid,
+    TopLeft,
+    TopRight,
+    Center,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum CalendarItem {
+    None,
+    Text {
+        #[serde(default)]
+        x: i32,
+        #[serde(default)]
+        y: i32,
+        #[serde(default)]
+        align: CalendarAlign,
+        #[serde(default)]
+        size: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<String>,
+    },
+    Image {
+        #[serde(default)]
+        x: i32,
+        #[serde(default)]
+        y: i32,
+        #[serde(default)]
+        align: CalendarAlign,
+        #[serde(default)]
+        size: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CalendarDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub month: Option<CalendarItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<CalendarItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekday: Option<CalendarItem>,
+}
+
+impl CalendarDeclaration {
+    pub fn is_empty(&self) -> bool {
+        self.month.is_none() && self.day.is_none() && self.weekday.is_none()
+    }
+
+    pub fn has_active_rules(&self) -> bool {
+        let active = |item: &Option<CalendarItem>| {
+            matches!(
+                item,
+                Some(CalendarItem::Text { .. } | CalendarItem::Image { .. })
+            )
+        };
+        active(&self.month) || active(&self.day) || active(&self.weekday)
+    }
+
+    pub fn referenced_images(&self) -> Vec<&str> {
+        let mut images = Vec::new();
+        for item in [&self.month, &self.day, &self.weekday] {
+            if let Some(CalendarItem::Image { context, .. }) = item {
+                for path in context {
+                    images.push(path.as_str());
+                }
+            }
+        }
+        images
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PackOptions<'a> {
     pub theme_id: &'a str,
@@ -63,6 +209,8 @@ pub struct PackOptions<'a> {
     pub description: Option<&'a str>,
     pub target: Option<&'a str>,
     pub replacements: &'a BTreeMap<String, Vec<u8>>,
+    pub backgrounds: Option<&'a BackgroundsDeclaration>,
+    pub calendar: Option<&'a CalendarDeclaration>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -152,8 +300,10 @@ pub fn build_crpack_with_mappings(
         options.target,
     )?;
 
-    if options.replacements.is_empty() {
-        return Err("replace at least one resource or application icon before exporting".into());
+    let has_backgrounds = options.backgrounds.map_or(false, |b| !b.is_empty());
+    let has_calendar = options.calendar.map_or(false, |c| !c.is_empty());
+    if options.replacements.is_empty() && !has_backgrounds && !has_calendar {
+        return Err("replace at least one resource, configure backgrounds, or declare calendar before exporting".into());
     }
 
     let mut total_bytes = 0usize;
@@ -177,6 +327,7 @@ pub fn build_crpack_with_mappings(
         options.theme_id,
         options.replacements,
     )?;
+    validate_feature_assets(options.backgrounds, options.calendar, options.replacements)?;
 
     let mut mapping_json = Vec::with_capacity(mappings.len());
     for mapping in mappings {
@@ -204,6 +355,24 @@ pub fn build_crpack_with_mappings(
             serde_json::to_value(quickapp_icons)
                 .map_err(|error| format!("could not serialize quickappIcons: {error}"))?,
         );
+    }
+    if let Some(backgrounds) = options.backgrounds {
+        if !backgrounds.is_empty() {
+            manifest.insert(
+                "backgrounds".into(),
+                serde_json::to_value(backgrounds)
+                    .map_err(|error| format!("could not serialize backgrounds: {error}"))?,
+            );
+        }
+    }
+    if let Some(calendar) = options.calendar {
+        if !calendar.is_empty() {
+            manifest.insert(
+                "calendar".into(),
+                serde_json::to_value(calendar)
+                    .map_err(|error| format!("could not serialize calendar: {error}"))?,
+            );
+        }
     }
     if let Some(version) = options.version {
         manifest.insert("version".into(), Value::String(version.to_string()));
@@ -438,6 +607,9 @@ pub fn validate_crpack(bytes: &[u8]) -> Result<UnpackedCrpack, String> {
             .map_err(|error| format!("invalid quickappIcons: {error}"))?,
     };
     validate_icon_declarations(&mappings, &quickapp_icons, &theme_id, &replacements)?;
+    let backgrounds = parse_manifest_backgrounds(obj, &theme_id)?;
+    let calendar = parse_manifest_calendar(obj, &theme_id)?;
+    validate_feature_assets(backgrounds.as_ref(), calendar.as_ref(), &replacements)?;
     Ok(UnpackedCrpack {
         theme_id,
         name,
@@ -450,6 +622,8 @@ pub fn validate_crpack(bytes: &[u8]) -> Result<UnpackedCrpack, String> {
         replacements,
         mappings,
         quickapp_icons,
+        backgrounds,
+        calendar,
         manifest_bytes,
     })
 }
@@ -654,6 +828,329 @@ fn validate_icon_declarations(
     validate_mapping_destinations(&combined, theme_id, replacements)
 }
 
+pub fn parse_background_setting(
+    val: &Value,
+    theme_id: &str,
+    label: &str,
+) -> Result<BackgroundSetting, String> {
+    match val {
+        Value::String(s) => {
+            if s == "system" {
+                Ok(BackgroundSetting::System)
+            } else if s == "blur" {
+                Ok(BackgroundSetting::Blur)
+            } else {
+                validate_background_image_path(s, theme_id, label)?;
+                Ok(BackgroundSetting::Image { image: s.clone() })
+            }
+        }
+        Value::Object(obj) => {
+            let mode = obj
+                .get("mode")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{label} mode must be a string"))?;
+            match mode {
+                "system" => Ok(BackgroundSetting::System),
+                "blur" => Ok(BackgroundSetting::Blur),
+                "image" => {
+                    let image = obj
+                        .get("image")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| format!("{label}.image must be a string"))?;
+                    validate_background_image_path(image, theme_id, label)?;
+                    Ok(BackgroundSetting::Image {
+                        image: image.to_string(),
+                    })
+                }
+                _ => Err(format!("unsupported {label} mode: {mode}")),
+            }
+        }
+        _ => Err(format!("{label} must be a string or object")),
+    }
+}
+
+fn validate_background_image_path(path: &str, theme_id: &str, label: &str) -> Result<(), String> {
+    validate_relative_path(path)?;
+    if path.ends_with('/') {
+        return Err(format!(
+            "{label} image path must be a file, not a directory"
+        ));
+    }
+    if !path.ends_with(".bin") {
+        return Err(format!("{label} image must be a .bin file"));
+    }
+    let root = format!("{THEME_ROOT}{theme_id}/");
+    if root.len() + path.len() >= MAX_PATH_BYTES {
+        return Err(format!(
+            "{label} image destination path exceeds 255 UTF-8 bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_manifest_backgrounds(
+    obj: &Map<String, Value>,
+    theme_id: &str,
+) -> Result<Option<BackgroundsDeclaration>, String> {
+    let mut bg = BackgroundsDeclaration::default();
+    let mut found = false;
+
+    if let Some(val) = obj.get("backgrounds") {
+        let bg_obj = val
+            .as_object()
+            .ok_or_else(|| "backgrounds must be a JSON object".to_string())?;
+        for (key, item_val) in bg_obj {
+            match key.as_str() {
+                "launcher" => {
+                    bg.launcher = Some(parse_background_setting(
+                        item_val,
+                        theme_id,
+                        "backgrounds.launcher",
+                    )?);
+                    found = true;
+                }
+                "controlCenter" => {
+                    bg.control_center = Some(parse_background_setting(
+                        item_val,
+                        theme_id,
+                        "backgrounds.controlCenter",
+                    )?);
+                    found = true;
+                }
+                "notifications" => {
+                    bg.notifications = Some(parse_background_setting(
+                        item_val,
+                        theme_id,
+                        "backgrounds.notifications",
+                    )?);
+                    found = true;
+                }
+                "widgets" => {
+                    bg.widgets = Some(parse_background_setting(
+                        item_val,
+                        theme_id,
+                        "backgrounds.widgets",
+                    )?);
+                    found = true;
+                }
+                _ => return Err(format!("unexpected field in backgrounds: {key}")),
+            }
+        }
+    }
+
+    // Legacy normalization: launcherBackground -> backgrounds.launcher
+    if bg.launcher.is_none() {
+        if let Some(val) = obj.get("launcherBackground") {
+            bg.launcher = Some(parse_background_setting(
+                val,
+                theme_id,
+                "launcherBackground",
+            )?);
+            found = true;
+        }
+    }
+
+    if found { Ok(Some(bg)) } else { Ok(None) }
+}
+
+fn validate_calendar_text(text: &str, label: &str) -> Result<(), String> {
+    if text.len() > 63 {
+        return Err(format!("{label} context text exceeds 63 UTF-8 bytes"));
+    }
+    if text.chars().any(|c| c.is_control()) {
+        return Err(format!(
+            "{label} context text must not contain control characters"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_calendar_align(val: Option<&Value>) -> Result<CalendarAlign, String> {
+    match val {
+        None => Ok(CalendarAlign::TopMid),
+        Some(Value::String(s)) => match s.as_str() {
+            "top_left" => Ok(CalendarAlign::TopLeft),
+            "top_mid" => Ok(CalendarAlign::TopMid),
+            "top_right" => Ok(CalendarAlign::TopRight),
+            "center" => Ok(CalendarAlign::Center),
+            _ => Err(format!("invalid calendar align: {s}")),
+        },
+        _ => Err("calendar align must be a string".into()),
+    }
+}
+
+pub fn parse_calendar_item(
+    name: &str,
+    val: &Value,
+    theme_id: &str,
+) -> Result<CalendarItem, String> {
+    let obj = val
+        .as_object()
+        .ok_or_else(|| format!("calendar.{name} must be an object"))?;
+    let item_type = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("calendar.{name}.type must be a string"))?;
+    let expected_count = match name {
+        "month" => 12,
+        "day" => 31,
+        "weekday" => 7,
+        _ => return Err(format!("unexpected calendar item: {name}")),
+    };
+    let default_y = if name == "day" { 34 } else { 17 };
+
+    match item_type {
+        "none" => Ok(CalendarItem::None),
+        "text" => {
+            let x = obj.get("x").and_then(Value::as_i64).unwrap_or(0);
+            let y = obj.get("y").and_then(Value::as_i64).unwrap_or(default_y);
+            if !(-112..=112).contains(&x) || !(-112..=112).contains(&y) {
+                return Err(format!(
+                    "calendar.{name}.x/y must be an integer in -112..=112"
+                ));
+            }
+            let align = parse_calendar_align(obj.get("align"))?;
+            let size = obj.get("size").and_then(Value::as_u64).unwrap_or(0);
+            if size != 0 && !(8..=72).contains(&size) {
+                return Err(format!("calendar.{name}.size must be 0 or 8..=72"));
+            }
+            let color = match obj.get("color") {
+                Some(Value::String(c)) => {
+                    if c.len() != 7
+                        || !c.starts_with('#')
+                        || !c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+                    {
+                        return Err(format!("calendar.{name}.color must be #RRGGBB"));
+                    }
+                    Some(c.to_uppercase())
+                }
+                Some(_) => return Err(format!("calendar.{name}.color must be a string")),
+                None => None,
+            };
+            let mut context = Vec::new();
+            if let Some(ctx_val) = obj.get("context") {
+                let arr = ctx_val
+                    .as_array()
+                    .ok_or_else(|| format!("calendar.{name}.context must be an array"))?;
+                if !arr.is_empty() && arr.len() != expected_count {
+                    return Err(format!(
+                        "calendar.{name}.context must have {expected_count} entries or be empty"
+                    ));
+                }
+                for entry in arr {
+                    let s = entry.as_str().ok_or_else(|| {
+                        format!("calendar.{name}.context entries must be strings")
+                    })?;
+                    validate_calendar_text(s, &format!("calendar.{name}"))?;
+                    context.push(s.to_string());
+                }
+            }
+            Ok(CalendarItem::Text {
+                x: x as i32,
+                y: y as i32,
+                align,
+                size: size as u32,
+                color,
+                context,
+            })
+        }
+        "image" => {
+            let x = obj.get("x").and_then(Value::as_i64).unwrap_or(0);
+            let y = obj.get("y").and_then(Value::as_i64).unwrap_or(default_y);
+            if !(-112..=112).contains(&x) || !(-112..=112).contains(&y) {
+                return Err(format!(
+                    "calendar.{name}.x/y must be an integer in -112..=112"
+                ));
+            }
+            let align = parse_calendar_align(obj.get("align"))?;
+            let size = obj.get("size").and_then(Value::as_u64).unwrap_or(0);
+            if size != 0 {
+                return Err(format!(
+                    "calendar.{name} image cannot specify non-zero size"
+                ));
+            }
+            if obj.contains_key("color") {
+                return Err(format!("calendar.{name} image cannot specify color"));
+            }
+            let ctx_val = obj
+                .get("context")
+                .ok_or_else(|| format!("calendar.{name}.context is required for image type"))?;
+            let arr = ctx_val
+                .as_array()
+                .ok_or_else(|| format!("calendar.{name}.context must be an array"))?;
+            if arr.len() != expected_count {
+                return Err(format!(
+                    "calendar.{name}.context image array must have exactly {expected_count} entries"
+                ));
+            }
+            let mut context = Vec::with_capacity(expected_count);
+            for entry in arr {
+                let path = entry
+                    .as_str()
+                    .ok_or_else(|| format!("calendar.{name}.context entry must be a string"))?;
+                validate_background_image_path(path, theme_id, &format!("calendar.{name}"))?;
+                context.push(path.to_string());
+            }
+            Ok(CalendarItem::Image {
+                x: x as i32,
+                y: y as i32,
+                align,
+                size: 0,
+                context,
+            })
+        }
+        _ => Err(format!("calendar.{name}.type must be none, text, or image")),
+    }
+}
+
+fn parse_manifest_calendar(
+    obj: &Map<String, Value>,
+    theme_id: &str,
+) -> Result<Option<CalendarDeclaration>, String> {
+    let Some(val) = obj.get("calendar") else {
+        return Ok(None);
+    };
+    let cal_obj = val
+        .as_object()
+        .ok_or_else(|| "calendar must be a JSON object".to_string())?;
+    let mut cal = CalendarDeclaration::default();
+    for (key, item_val) in cal_obj {
+        match key.as_str() {
+            "month" => cal.month = Some(parse_calendar_item("month", item_val, theme_id)?),
+            "day" => cal.day = Some(parse_calendar_item("day", item_val, theme_id)?),
+            "weekday" => cal.weekday = Some(parse_calendar_item("weekday", item_val, theme_id)?),
+            _ => return Err(format!("unexpected field in calendar: {key}")),
+        }
+    }
+    Ok(Some(cal))
+}
+
+fn validate_feature_assets(
+    backgrounds: Option<&BackgroundsDeclaration>,
+    calendar: Option<&CalendarDeclaration>,
+    replacements: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    if let Some(bg) = backgrounds {
+        for img in bg.referenced_images() {
+            if !replacements.contains_key(img) {
+                return Err(format!(
+                    "background image '{img}' not found in archive replacements"
+                ));
+            }
+        }
+    }
+    if let Some(cal) = calendar {
+        for img in cal.referenced_images() {
+            if !replacements.contains_key(img) {
+                return Err(format!(
+                    "calendar image '{img}' not found in archive replacements"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_mapping_destinations(
     mappings: &[Mapping],
     theme_id: &str,
@@ -852,6 +1349,8 @@ mod tests {
             description: None,
             target: Some("xiaomi-band-11-4.100.155"),
             replacements,
+            backgrounds: None,
+            calendar: None,
         }
     }
 
@@ -916,6 +1415,8 @@ mod tests {
             description: Some("Description of test"),
             target: Some("xiaomi-band-11-4.100.155"),
             replacements: &replacements,
+            backgrounds: None,
+            calendar: None,
         };
         let bytes = build_crpack(&pack_opts).unwrap();
         let unpacked = parse_crpack(&bytes).unwrap();
@@ -1623,5 +2124,136 @@ mod tests {
         let bytes = archive_with(&manifest_with, &[("icon.bin", b"x")]);
         let unpacked = validate_crpack(&bytes).unwrap();
         assert_eq!(unpacked.version_code, Some(100));
+    }
+
+    #[test]
+    fn backgrounds_and_calendar_roundtrip_and_legacy_normalization() {
+        let mut manifest_legacy = manifest();
+        manifest_legacy["launcherBackground"] = json!("blur");
+        let bytes = archive_with(&manifest_legacy, &[("icon.bin", b"x")]);
+        let unpacked = validate_crpack(&bytes).unwrap();
+        assert_eq!(
+            unpacked.backgrounds,
+            Some(BackgroundsDeclaration {
+                launcher: Some(BackgroundSetting::Blur),
+                control_center: None,
+                notifications: None,
+                widgets: None,
+            })
+        );
+
+        let bg = BackgroundsDeclaration {
+            launcher: Some(BackgroundSetting::Image {
+                image: "backgrounds/launcher.bin".into(),
+            }),
+            control_center: Some(BackgroundSetting::Blur),
+            notifications: Some(BackgroundSetting::System),
+            widgets: None,
+        };
+        let cal = CalendarDeclaration {
+            month: Some(CalendarItem::None),
+            day: Some(CalendarItem::Text {
+                x: 0,
+                y: 34,
+                align: CalendarAlign::TopMid,
+                size: 32,
+                color: Some("#FFFFFF".into()),
+                context: vec![],
+            }),
+            weekday: Some(CalendarItem::Text {
+                x: 0,
+                y: 17,
+                align: CalendarAlign::Center,
+                size: 16,
+                color: Some("#FFCC00".into()),
+                context: vec![],
+            }),
+        };
+        let files = BTreeMap::from([
+            ("backgrounds/launcher.bin".into(), vec![1, 2, 3]),
+            ("app/test.bin".into(), vec![4, 5]),
+        ]);
+        let pack_opts = PackOptions {
+            theme_id: "dark",
+            name: "Dark",
+            version: None,
+            version_code: None,
+            author: None,
+            description: None,
+            target: None,
+            replacements: &files,
+            backgrounds: Some(&bg),
+            calendar: Some(&cal),
+        };
+        let bytes = build_crpack(&pack_opts).unwrap();
+        let unpacked = validate_crpack(&bytes).unwrap();
+        assert_eq!(unpacked.backgrounds, Some(bg));
+        assert_eq!(unpacked.calendar, Some(cal));
+    }
+
+    #[test]
+    fn backgrounds_missing_image_fails_validation() {
+        let bg = BackgroundsDeclaration {
+            launcher: Some(BackgroundSetting::Image {
+                image: "backgrounds/launcher.bin".into(),
+            }),
+            control_center: None,
+            notifications: None,
+            widgets: None,
+        };
+        let files = BTreeMap::from([("icon.bin".into(), vec![1])]);
+        let pack_opts = PackOptions {
+            theme_id: "dark",
+            name: "Dark",
+            version: None,
+            version_code: None,
+            author: None,
+            description: None,
+            target: None,
+            replacements: &files,
+            backgrounds: Some(&bg),
+            calendar: None,
+        };
+        assert!(build_crpack(&pack_opts).is_err());
+    }
+
+    #[test]
+    fn calendar_validation_rules_and_image_requirements() {
+        let mut manifest_bad_color = manifest();
+        manifest_bad_color["calendar"] = json!({
+            "day": {
+                "type": "text",
+                "color": "red"
+            }
+        });
+        let bytes = archive_with(&manifest_bad_color, &[("icon.bin", b"x")]);
+        assert!(validate_crpack(&bytes).is_err());
+
+        let mut manifest_cal_image = manifest();
+        manifest_cal_image["calendar"] = json!({
+            "weekday": {
+                "type": "image",
+                "context": [
+                    "cal/1.bin", "cal/2.bin", "cal/3.bin", "cal/4.bin", "cal/5.bin", "cal/6.bin", "cal/7.bin"
+                ]
+            }
+        });
+        // Missing cal/*.bin fails
+        let bytes_missing = archive_with(&manifest_cal_image, &[("icon.bin", b"x")]);
+        assert!(validate_crpack(&bytes_missing).is_err());
+
+        // With cal/*.bin succeeds
+        let files = [
+            ("icon.bin", b"x".as_slice()),
+            ("cal/1.bin", b"1"),
+            ("cal/2.bin", b"2"),
+            ("cal/3.bin", b"3"),
+            ("cal/4.bin", b"4"),
+            ("cal/5.bin", b"5"),
+            ("cal/6.bin", b"6"),
+            ("cal/7.bin", b"7"),
+        ];
+        let bytes_ok = archive_with(&manifest_cal_image, &files);
+        assert!(validate_crpack(&bytes_ok).is_ok());
     }
 }

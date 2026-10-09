@@ -92,6 +92,226 @@ struct RuleSnapshot {
     verification: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorkbenchTab {
+    Resources,
+    Backgrounds,
+    Calendar,
+    Metadata,
+}
+
+impl Default for WorkbenchTab {
+    fn default() -> Self {
+        Self::Resources
+    }
+}
+
+impl WorkbenchTab {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Resources => "📁 图标与资源",
+            Self::Backgrounds => "🎨 系统背景",
+            Self::Calendar => "📅 动态日历工坊",
+            Self::Metadata => "⚙️ 主题属性与清单",
+        }
+    }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Resources => "resources",
+            Self::Backgrounds => "backgrounds",
+            Self::Calendar => "calendar",
+            Self::Metadata => "metadata",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BgSurface {
+    Launcher,
+    ControlCenter,
+    Notifications,
+    Widgets,
+}
+
+impl BgSurface {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Launcher => "桌面 (Launcher)",
+            Self::ControlCenter => "控制中心 (Control Center)",
+            Self::Notifications => "通知中心 (Notifications)",
+            Self::Widgets => "负一屏小部件 (Widgets)",
+        }
+    }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Launcher => "launcher",
+            Self::ControlCenter => "controlCenter",
+            Self::Notifications => "notifications",
+            Self::Widgets => "widgets",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "launcher" => Some(Self::Launcher),
+            "controlCenter" => Some(Self::ControlCenter),
+            "notifications" => Some(Self::Notifications),
+            "widgets" => Some(Self::Widgets),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BgModeDraft {
+    System,
+    Blur,
+    Image {
+        image_path: String,
+        bytes: Option<Arc<Vec<u8>>>,
+        preview_uri: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct BackgroundsDraft {
+    pub active_surface: BgSurface,
+    pub launcher: BgModeDraft,
+    pub control_center: BgModeDraft,
+    pub notifications: BgModeDraft,
+    pub widgets: BgModeDraft,
+}
+
+impl Default for BackgroundsDraft {
+    fn default() -> Self {
+        Self {
+            active_surface: BgSurface::Launcher,
+            launcher: BgModeDraft::System,
+            control_center: BgModeDraft::System,
+            notifications: BgModeDraft::System,
+            widgets: BgModeDraft::System,
+        }
+    }
+}
+
+impl BackgroundsDraft {
+    pub fn get(&self, surface: BgSurface) -> &BgModeDraft {
+        match surface {
+            BgSurface::Launcher => &self.launcher,
+            BgSurface::ControlCenter => &self.control_center,
+            BgSurface::Notifications => &self.notifications,
+            BgSurface::Widgets => &self.widgets,
+        }
+    }
+
+    pub fn get_mut(&mut self, surface: BgSurface) -> &mut BgModeDraft {
+        match surface {
+            BgSurface::Launcher => &mut self.launcher,
+            BgSurface::ControlCenter => &mut self.control_center,
+            BgSurface::Notifications => &mut self.notifications,
+            BgSurface::Widgets => &mut self.widgets,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CalendarActiveTab {
+    Day,
+    Month,
+    Weekday,
+}
+
+impl CalendarActiveTab {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Day => "日期 (Day)",
+            Self::Month => "月份 (Month)",
+            Self::Weekday => "星期 (Weekday)",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CalendarItemDraft {
+    None,
+    Text {
+        x: i32,
+        y: i32,
+        align: crpack::CalendarAlign,
+        size: u32,
+        color: String,
+    },
+    Image {
+        x: i32,
+        y: i32,
+        align: crpack::CalendarAlign,
+        context: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct CalendarDraft {
+    pub enabled: bool,
+    pub active_tab: CalendarActiveTab,
+    pub month: CalendarItemDraft,
+    pub day: CalendarItemDraft,
+    pub weekday: CalendarItemDraft,
+    pub show_guides: bool,
+    pub test_year: i32,
+    pub test_month: u32,
+    pub test_day: u32,
+    pub test_weekday: u32,
+}
+
+impl Default for CalendarDraft {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            active_tab: CalendarActiveTab::Day,
+            month: CalendarItemDraft::None,
+            day: CalendarItemDraft::Text {
+                x: 0,
+                y: 34,
+                align: crpack::CalendarAlign::TopMid,
+                size: 32,
+                color: "#FFFFFF".into(),
+            },
+            weekday: CalendarItemDraft::Text {
+                x: 0,
+                y: 14,
+                align: crpack::CalendarAlign::TopMid,
+                size: 16,
+                color: "#FFCC00".into(),
+            },
+            show_guides: true,
+            test_year: 2026,
+            test_month: 10,
+            test_day: 9,
+            test_weekday: 4,
+        }
+    }
+}
+
+impl CalendarDraft {
+    pub fn current_item(&self) -> &CalendarItemDraft {
+        match self.active_tab {
+            CalendarActiveTab::Day => &self.day,
+            CalendarActiveTab::Month => &self.month,
+            CalendarActiveTab::Weekday => &self.weekday,
+        }
+    }
+
+    pub fn current_item_mut(&mut self) -> &mut CalendarItemDraft {
+        match self.active_tab {
+            CalendarActiveTab::Day => &mut self.day,
+            CalendarActiveTab::Month => &mut self.month,
+            CalendarActiveTab::Weekday => &mut self.weekday,
+        }
+    }
+}
+
 struct UiState {
     root_element_id: Option<String>,
     firmware_name: String,
@@ -113,6 +333,11 @@ struct UiState {
     canopus: Option<IconAsset>,
     quickapps: Vec<QuickappEntry>,
     quickapp_package: String,
+    workbench_tab: WorkbenchTab,
+    custom_expanded: bool,
+    apps_expanded: bool,
+    backgrounds: BackgroundsDraft,
+    calendar: CalendarDraft,
     theme_id: String,
     pack_name: String,
     version: String,
@@ -152,6 +377,11 @@ impl Default for UiState {
             canopus: None,
             quickapps: Vec::new(),
             quickapp_package: String::new(),
+            workbench_tab: WorkbenchTab::Resources,
+            custom_expanded: true,
+            apps_expanded: false,
+            backgrounds: BackgroundsDraft::default(),
+            calendar: CalendarDraft::default(),
             theme_id: "corona".into(),
             pack_name: "Corona Resource Pack".into(),
             version: "1.0.0".into(),
@@ -199,6 +429,13 @@ struct UiSnapshot {
     canopus: IconSnapshot,
     quickapps: Vec<IconSnapshot>,
     quickapp_package: String,
+    workbench_tab: WorkbenchTab,
+    custom_expanded: bool,
+    apps_expanded: bool,
+    backgrounds: BackgroundsDraft,
+    calendar: CalendarDraft,
+    calendar_bg_preview_uri: Option<String>,
+    calendar_image_previews: BTreeMap<String, String>,
     replacement_sizes: BTreeMap<String, usize>,
     theme_id: String,
     pack_name: String,
@@ -487,6 +724,37 @@ fn snapshot(state: &mut UiState) -> UiSnapshot {
             })
             .collect(),
         quickapp_package: state.quickapp_package.clone(),
+        workbench_tab: state.workbench_tab,
+        custom_expanded: state.custom_expanded,
+        apps_expanded: state.apps_expanded,
+        backgrounds: state.backgrounds.clone(),
+        calendar: state.calendar.clone(),
+        calendar_image_previews: {
+            let mut previews = BTreeMap::new();
+            for item in [
+                &state.calendar.day,
+                &state.calendar.month,
+                &state.calendar.weekday,
+            ] {
+                if let CalendarItemDraft::Image { context, .. } = item {
+                    for path in context {
+                        if let Some(bytes) = destination_bytes(state, path)
+                            && let Some(uri) = thumbnail_from_bytes(bytes)
+                        {
+                            previews.insert(path.clone(), uri);
+                        }
+                    }
+                }
+            }
+            previews
+        },
+        calendar_bg_preview_uri: {
+            let p67 = "app/perpetual_calendar/calendar_background_icon.bin";
+            let b11 = "app/perpetual_calendar/launcher_icon.bin";
+            resource_replacement(state, p67)
+                .or_else(|| resource_replacement(state, b11))
+                .and_then(thumbnail_from_bytes)
+        },
         replacement_sizes: state
             .firmware
             .as_ref()
@@ -602,7 +870,410 @@ async fn process_click(event_id: &str) {
                 render_current();
             }
         }
+        "resources.custom.toggle" | "resources.apps.toggle" => {
+            let mut state = lock_state();
+            if event_id == "resources.custom.toggle" {
+                state.custom_expanded = !state.custom_expanded;
+            } else {
+                state.apps_expanded = !state.apps_expanded;
+            }
+            drop(state);
+            render_current();
+        }
         "firmware.upload" => begin_firmware_pick().await,
+        _ if event_id.starts_with("tab:") => {
+            let tab_key = &event_id["tab:".len()..];
+            let mut state = lock_state();
+            state.workbench_tab = match tab_key {
+                "backgrounds" => WorkbenchTab::Backgrounds,
+                "calendar" => WorkbenchTab::Calendar,
+                "metadata" => WorkbenchTab::Metadata,
+                _ => WorkbenchTab::Resources,
+            };
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("bg.set:") => {
+            let parts: Vec<&str> = event_id["bg.set:".len()..].split(':').collect();
+            if parts.len() == 2
+                && let Some(surface) = BgSurface::from_key(parts[0])
+            {
+                let mut state = lock_state();
+                match parts[1] {
+                    "blur" => *state.backgrounds.get_mut(surface) = BgModeDraft::Blur,
+                    "image" => {
+                        let cur = state.backgrounds.get(surface);
+                        if !matches!(cur, BgModeDraft::Image { .. }) {
+                            *state.backgrounds.get_mut(surface) = BgModeDraft::Image {
+                                image_path: format!("backgrounds/{}.bin", surface.key()),
+                                bytes: None,
+                                preview_uri: None,
+                            };
+                        }
+                    }
+                    _ => *state.backgrounds.get_mut(surface) = BgModeDraft::System,
+                }
+                drop(state);
+                render_current();
+            }
+        }
+        _ if event_id.starts_with("bg.pick:") => {
+            let key = &event_id["bg.pick:".len()..];
+            if let Some(surface) = BgSurface::from_key(key) {
+                begin_background_pick_for(surface).await;
+            }
+        }
+        _ if event_id.starts_with("bg.clear:") => {
+            let key = &event_id["bg.clear:".len()..];
+            if let Some(surface) = BgSurface::from_key(key) {
+                let mut state = lock_state();
+                *state.backgrounds.get_mut(surface) = BgModeDraft::System;
+                drop(state);
+                render_current();
+            }
+        }
+        _ if event_id.starts_with("bg.tab:") => {
+            let key = &event_id["bg.tab:".len()..];
+            let mut state = lock_state();
+            state.backgrounds.active_surface = match key {
+                "controlCenter" => BgSurface::ControlCenter,
+                "notifications" => BgSurface::Notifications,
+                "widgets" => BgSurface::Widgets,
+                _ => BgSurface::Launcher,
+            };
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("bg.mode:") => {
+            let mode = &event_id["bg.mode:".len()..];
+            let mut state = lock_state();
+            let surface = state.backgrounds.active_surface;
+            match mode {
+                "blur" => *state.backgrounds.get_mut(surface) = BgModeDraft::Blur,
+                "image" => {
+                    let cur = state.backgrounds.get(surface);
+                    if !matches!(cur, BgModeDraft::Image { .. }) {
+                        *state.backgrounds.get_mut(surface) = BgModeDraft::Image {
+                            image_path: format!("backgrounds/{}.bin", surface.key()),
+                            bytes: None,
+                            preview_uri: None,
+                        };
+                    }
+                }
+                _ => *state.backgrounds.get_mut(surface) = BgModeDraft::System,
+            }
+            drop(state);
+            render_current();
+        }
+        "bg.clear" => {
+            let mut state = lock_state();
+            let surface = state.backgrounds.active_surface;
+            if let BgModeDraft::Image {
+                bytes, preview_uri, ..
+            } = state.backgrounds.get_mut(surface)
+            {
+                *bytes = None;
+                *preview_uri = None;
+            }
+            drop(state);
+            render_current();
+        }
+        "bg.reset_all" => {
+            let mut state = lock_state();
+            state.backgrounds = BackgroundsDraft::default();
+            drop(state);
+            render_current();
+        }
+        "bg.pick.image" => begin_background_pick().await,
+        "calendar.guides.toggle" => {
+            let mut state = lock_state();
+            state.calendar.show_guides = !state.calendar.show_guides;
+            drop(state);
+            render_current();
+        }
+        "calendar.center_x" => {
+            let mut state = lock_state();
+            match state.calendar.current_item_mut() {
+                CalendarItemDraft::Text { x, .. } | CalendarItemDraft::Image { x, .. } => {
+                    *x = 0;
+                }
+                _ => {}
+            }
+            drop(state);
+            render_current();
+        }
+        "calendar.pick.sequence" => begin_calendar_sequence_pick().await,
+        _ if event_id.starts_with("calendar.pick.frame:") => {
+            if let Ok(index) = event_id["calendar.pick.frame:".len()..].parse::<usize>() {
+                begin_calendar_frame_pick(index).await;
+            }
+        }
+        "calendar.pick.bg" => begin_calendar_bg_pick().await,
+        "calendar.clear.bg" => {
+            let mut state = lock_state();
+            match clear_calendar_background(&mut state) {
+                Ok(()) => state.status = "已移除日历底图规则；共享及导入素材保留。".into(),
+                Err(error) => state.error = Some(error),
+            }
+            drop(state);
+            render_current();
+        }
+        "calendar.preset:classic" => {
+            let mut state = lock_state();
+            state.calendar.day = CalendarItemDraft::Text {
+                x: 0,
+                y: 34,
+                align: crpack::CalendarAlign::TopMid,
+                size: 32,
+                color: "#FFFFFF".into(),
+            };
+            state.calendar.weekday = CalendarItemDraft::Text {
+                x: 0,
+                y: 14,
+                align: crpack::CalendarAlign::TopMid,
+                size: 16,
+                color: "#FFCC00".into(),
+            };
+            state.calendar.month = CalendarItemDraft::None;
+            state.status = "已应用「经典居中」预设模板。".into();
+            drop(state);
+            render_current();
+        }
+        "calendar.preset:three_rows" => {
+            let mut state = lock_state();
+            state.calendar.weekday = CalendarItemDraft::Text {
+                x: 0,
+                y: 10,
+                align: crpack::CalendarAlign::TopMid,
+                size: 14,
+                color: "#FFCC00".into(),
+            };
+            state.calendar.day = CalendarItemDraft::Text {
+                x: 0,
+                y: 28,
+                align: crpack::CalendarAlign::TopMid,
+                size: 30,
+                color: "#FFFFFF".into(),
+            };
+            state.calendar.month = CalendarItemDraft::Text {
+                x: 0,
+                y: 62,
+                align: crpack::CalendarAlign::TopMid,
+                size: 14,
+                color: "#00CCFF".into(),
+            };
+            state.status = "已应用「三行总览」预设模板。".into();
+            drop(state);
+            render_current();
+        }
+        "calendar.preset:minimal" => {
+            let mut state = lock_state();
+            state.calendar.day = CalendarItemDraft::Text {
+                x: 0,
+                y: 22,
+                align: crpack::CalendarAlign::Center,
+                size: 48,
+                color: "#FFFFFF".into(),
+            };
+            state.calendar.weekday = CalendarItemDraft::None;
+            state.calendar.month = CalendarItemDraft::None;
+            state.status = "已应用「极简大日」预设模板。".into();
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.step:") => {
+            let parts: Vec<&str> = event_id["calendar.step:".len()..].split(':').collect();
+            if parts.len() == 2
+                && let Ok(delta) = parts[1].parse::<i32>()
+            {
+                let mut state = lock_state();
+                match parts[0] {
+                    "x" => {
+                        if let CalendarItemDraft::Text { x, .. }
+                        | CalendarItemDraft::Image { x, .. } = state.calendar.current_item_mut()
+                        {
+                            *x = (*x + delta).clamp(-112, 112);
+                        }
+                    }
+                    "y" => {
+                        if let CalendarItemDraft::Text { y, .. }
+                        | CalendarItemDraft::Image { y, .. } = state.calendar.current_item_mut()
+                        {
+                            *y = (*y + delta).clamp(-112, 112);
+                        }
+                    }
+                    "size" => {
+                        if let CalendarItemDraft::Text { size, .. } =
+                            state.calendar.current_item_mut()
+                        {
+                            let new_size = (*size as i32 + delta).clamp(8, 72);
+                            *size = new_size as u32;
+                        }
+                    }
+                    _ => {}
+                }
+                drop(state);
+                render_current();
+            }
+        }
+        "calendar.toggle" => {
+            let mut state = lock_state();
+            state.calendar.enabled = !state.calendar.enabled;
+            drop(state);
+            render_current();
+        }
+        "calendar.reset" => {
+            let mut state = lock_state();
+            state.calendar = CalendarDraft::default();
+            state.calendar.enabled = true;
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.tab:") => {
+            let tab = &event_id["calendar.tab:".len()..];
+            let mut state = lock_state();
+            state.calendar.active_tab = match tab {
+                "month" => CalendarActiveTab::Month,
+                "weekday" => CalendarActiveTab::Weekday,
+                _ => CalendarActiveTab::Day,
+            };
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.type:") => {
+            let ty = &event_id["calendar.type:".len()..];
+            let mut state = lock_state();
+            match ty {
+                "none" => *state.calendar.current_item_mut() = CalendarItemDraft::None,
+                "text" => {
+                    let cur = state.calendar.current_item();
+                    if !matches!(cur, CalendarItemDraft::Text { .. }) {
+                        let y = if state.calendar.active_tab == CalendarActiveTab::Day {
+                            34
+                        } else {
+                            17
+                        };
+                        *state.calendar.current_item_mut() = CalendarItemDraft::Text {
+                            x: 0,
+                            y,
+                            align: crpack::CalendarAlign::TopMid,
+                            size: if state.calendar.active_tab == CalendarActiveTab::Day {
+                                32
+                            } else {
+                                16
+                            },
+                            color: "#FFFFFF".into(),
+                        };
+                    }
+                }
+                "image" => {
+                    let cur = state.calendar.current_item();
+                    if !matches!(cur, CalendarItemDraft::Image { .. }) {
+                        *state.calendar.current_item_mut() = CalendarItemDraft::Image {
+                            x: 0,
+                            y: 17,
+                            align: crpack::CalendarAlign::TopMid,
+                            context: vec![],
+                        };
+                    }
+                }
+                _ => {}
+            }
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.align:") => {
+            let align_str = &event_id["calendar.align:".len()..];
+            let align = match align_str {
+                "top_left" => crpack::CalendarAlign::TopLeft,
+                "top_right" => crpack::CalendarAlign::TopRight,
+                "center" => crpack::CalendarAlign::Center,
+                _ => crpack::CalendarAlign::TopMid,
+            };
+            let mut state = lock_state();
+            match state.calendar.current_item_mut() {
+                CalendarItemDraft::Text { align: a, .. }
+                | CalendarItemDraft::Image { align: a, .. } => *a = align,
+                _ => {}
+            }
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.x:") => {
+            let delta = match &event_id["calendar.x:".len()..] {
+                "dec_5" => -5,
+                "dec_1" => -1,
+                "inc_1" => 1,
+                "inc_5" => 5,
+                _ => 0,
+            };
+            let mut state = lock_state();
+            match state.calendar.current_item_mut() {
+                CalendarItemDraft::Text { x, .. } | CalendarItemDraft::Image { x, .. } => {
+                    *x = (*x + delta).clamp(-112, 112);
+                }
+                _ => {}
+            }
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.y:") => {
+            let delta = match &event_id["calendar.y:".len()..] {
+                "dec_5" => -5,
+                "dec_1" => -1,
+                "inc_1" => 1,
+                "inc_5" => 5,
+                _ => 0,
+            };
+            let mut state = lock_state();
+            match state.calendar.current_item_mut() {
+                CalendarItemDraft::Text { y, .. } | CalendarItemDraft::Image { y, .. } => {
+                    *y = (*y + delta).clamp(-112, 112);
+                }
+                _ => {}
+            }
+            drop(state);
+            render_current();
+        }
+        _ if event_id.starts_with("calendar.size:") => {
+            let mut state = lock_state();
+            if let CalendarItemDraft::Text { size, .. } = state.calendar.current_item_mut() {
+                match &event_id["calendar.size:".len()..] {
+                    "dec_2" => *size = size.saturating_sub(2).max(8),
+                    "inc_2" => *size = (*size + 2).clamp(8, 72),
+                    "reset" => *size = 0,
+                    _ => {}
+                }
+            }
+            drop(state);
+            render_current();
+        }
+        "calendar.test.prev_day" => {
+            let mut state = lock_state();
+            state.calendar.test_day = if state.calendar.test_day > 1 {
+                state.calendar.test_day - 1
+            } else {
+                31
+            };
+            state.calendar.test_weekday = if state.calendar.test_weekday > 0 {
+                state.calendar.test_weekday - 1
+            } else {
+                6
+            };
+            drop(state);
+            render_current();
+        }
+        "calendar.test.next_day" => {
+            let mut state = lock_state();
+            state.calendar.test_day = if state.calendar.test_day < 31 {
+                state.calendar.test_day + 1
+            } else {
+                1
+            };
+            state.calendar.test_weekday = (state.calendar.test_weekday + 1) % 7;
+            drop(state);
+            render_current();
+        }
         "pack.import" => begin_crpack_pick().await,
         "pack.export" => begin_export().await,
         "resource.extract" => begin_resource_extract(false).await,
@@ -770,6 +1441,58 @@ fn process_change(event_id: &str, payload: &str) {
             "browser.search" => {
                 state.search_query = value;
                 false
+            }
+            "calendar.color" => {
+                if let CalendarItemDraft::Text { color, .. } = state.calendar.current_item_mut() {
+                    *color = value;
+                }
+                true
+            }
+            "calendar.x" => {
+                if let Ok(num) = value.trim().parse::<i32>() {
+                    let clamped = num.clamp(-112, 112);
+                    match state.calendar.current_item_mut() {
+                        CalendarItemDraft::Text { x, .. } | CalendarItemDraft::Image { x, .. } => {
+                            *x = clamped;
+                        }
+                        _ => {}
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            "calendar.y" => {
+                if let Ok(num) = value.trim().parse::<i32>() {
+                    let clamped = num.clamp(-112, 112);
+                    match state.calendar.current_item_mut() {
+                        CalendarItemDraft::Text { y, .. } | CalendarItemDraft::Image { y, .. } => {
+                            *y = clamped;
+                        }
+                        _ => {}
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            "calendar.size" => {
+                if let Ok(num) = value.trim().parse::<u32>() {
+                    if !valid_calendar_size(num) {
+                        state.error = Some("字号必须为 0（原生）或 8–72。".into());
+                        drop(state);
+                        render_current();
+                        return;
+                    }
+                    let clamped = num;
+                    if let CalendarItemDraft::Text { size, .. } = state.calendar.current_item_mut()
+                    {
+                        *size = clamped;
+                    }
+                    true
+                } else {
+                    false
+                }
             }
             "pack.id" => {
                 state.theme_id = value;
@@ -1025,9 +1748,16 @@ async fn begin_crpack_pick() {
             }
 
             // Import replaces the project; app assets remain outside the firmware tree.
+            let replacements = unpacked.replacements;
+            import_feature_assets(
+                &mut state,
+                unpacked.backgrounds,
+                unpacked.calendar,
+                &replacements,
+            );
             import_assets(
                 &mut state,
-                unpacked.replacements,
+                replacements,
                 unpacked.mappings,
                 unpacked.quickapp_icons,
             );
@@ -1253,6 +1983,78 @@ fn normalized_declarations(
         }
     }
     declarations
+}
+
+fn import_feature_assets(
+    state: &mut UiState,
+    backgrounds: Option<crpack::BackgroundsDeclaration>,
+    calendar: Option<crpack::CalendarDeclaration>,
+    replacements: &BTreeMap<String, Vec<u8>>,
+) {
+    if let Some(bg) = backgrounds {
+        let mut draft = BackgroundsDraft::default();
+        let restore = |setting: Option<crpack::BackgroundSetting>| match setting {
+            Some(crpack::BackgroundSetting::Blur) => BgModeDraft::Blur,
+            Some(crpack::BackgroundSetting::Image { image }) => {
+                let bytes = replacements.get(&image).map(|b| Arc::new(b.clone()));
+                let preview_uri = bytes.as_ref().and_then(|b| thumbnail_from_bytes(b));
+                BgModeDraft::Image {
+                    image_path: image,
+                    bytes,
+                    preview_uri,
+                }
+            }
+            _ => BgModeDraft::System,
+        };
+        draft.launcher = restore(bg.launcher);
+        draft.control_center = restore(bg.control_center);
+        draft.notifications = restore(bg.notifications);
+        draft.widgets = restore(bg.widgets);
+        state.backgrounds = draft;
+    } else {
+        state.backgrounds = BackgroundsDraft::default();
+    }
+
+    if let Some(cal) = calendar {
+        let mut draft = CalendarDraft::default();
+        draft.enabled = true;
+        let restore_item = |item: Option<crpack::CalendarItem>, _default_y: i32| match item {
+            Some(crpack::CalendarItem::None) => CalendarItemDraft::None,
+            Some(crpack::CalendarItem::Text {
+                x,
+                y,
+                align,
+                size,
+                color,
+                ..
+            }) => CalendarItemDraft::Text {
+                x,
+                y,
+                align,
+                size,
+                color: color.unwrap_or_else(|| "#FFFFFF".into()),
+            },
+            Some(crpack::CalendarItem::Image {
+                x,
+                y,
+                align,
+                context,
+                ..
+            }) => CalendarItemDraft::Image {
+                x,
+                y,
+                align,
+                context,
+            },
+            None => CalendarItemDraft::None,
+        };
+        draft.month = restore_item(cal.month, 17);
+        draft.day = restore_item(cal.day, 34);
+        draft.weekday = restore_item(cal.weekday, 17);
+        state.calendar = draft;
+    } else {
+        state.calendar = CalendarDraft::default();
+    }
 }
 
 fn import_assets(
@@ -1889,6 +2691,574 @@ async fn begin_custom_pick(mode: CustomPick) {
     render_current();
 }
 
+async fn begin_background_pick() {
+    let surface = lock_state().backgrounds.active_surface;
+    begin_background_pick_for(surface).await;
+}
+
+async fn begin_background_pick_for(surface: BgSurface) {
+    {
+        let mut state = lock_state();
+        state.busy = true;
+        state.error = None;
+        state.status = format!("等待选择 {} 壁纸图片（支持 PNG / BIN）…", surface.name());
+    }
+    render_current();
+    let picked = psys_host::dialog::pick_file(
+        psys_host::dialog::PickConfig {
+            read: true,
+            copy_to: None,
+        },
+        psys_host::dialog::FilterConfig {
+            multiple: false,
+            extensions: vec!["png".into(), "bin".into()],
+            default_directory: String::new(),
+            default_file_name: String::new(),
+        },
+    )
+    .await;
+    let mut state = lock_state();
+    state.busy = false;
+    match picked {
+        Ok(picked) if picked.name.is_empty() => {
+            state.status = "已取消壁纸选择。".into();
+        }
+        Ok(picked) => {
+            let name = picked.name;
+            let bytes = picked.data;
+            let is_png =
+                name.to_lowercase().ends_with(".png") || bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+            let encoded_bytes = if is_png {
+                match lvgl::encode_png_argb8888(&bytes) {
+                    Ok(enc) => enc.bytes,
+                    Err(e) => {
+                        state.error = Some(format!("壁纸 PNG 转换失败：{e}"));
+                        drop(state);
+                        render_current();
+                        return;
+                    }
+                }
+            } else {
+                bytes
+            };
+            let previous = match state.backgrounds.get(surface) {
+                BgModeDraft::Image {
+                    bytes: Some(bytes), ..
+                } => bytes.len(),
+                _ => 0,
+            };
+            let validation = validate_icon_budget(
+                encoded_bytes.len(),
+                workbench_asset_bytes(&state),
+                previous,
+                false,
+            )
+            .and_then(|()| app_icons::inspect_bin(&encoded_bytes).map(|_| ()));
+            if let Err(error) = validation {
+                state.error = Some(error);
+                drop(state);
+                render_current();
+                return;
+            }
+            let preview_uri = thumbnail_from_bytes(&encoded_bytes);
+            *state.backgrounds.get_mut(surface) = BgModeDraft::Image {
+                image_path: format!("backgrounds/{}.bin", surface.key()),
+                bytes: Some(Arc::new(encoded_bytes)),
+                preview_uri,
+            };
+            state.status = format!("已设置 {} 壁纸：{}", surface.name(), name);
+        }
+        Err(e) => {
+            state.error = Some(format!("选择壁纸失败：{e:?}"));
+        }
+    }
+    drop(state);
+    render_current();
+}
+
+fn calendar_sequence_import_visible(item: &CalendarItemDraft) -> bool {
+    matches!(item, CalendarItemDraft::Image { .. })
+}
+
+fn calendar_sequence_count(tab: CalendarActiveTab) -> usize {
+    match tab {
+        CalendarActiveTab::Day => 31,
+        CalendarActiveTab::Month => 12,
+        CalendarActiveTab::Weekday => 7,
+    }
+}
+
+fn commit_calendar_sequence(
+    state: &mut UiState,
+    tab: CalendarActiveTab,
+    inputs: Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    if inputs.len() != calendar_sequence_count(tab) {
+        return Err("图片数量不符；原序列未更改。".into());
+    }
+    commit_calendar_frames(state, tab, inputs.into_iter().enumerate().collect())
+}
+
+fn calendar_slot_label(tab: CalendarActiveTab, index: usize) -> String {
+    match tab {
+        CalendarActiveTab::Day => format!("{}日", index + 1),
+        CalendarActiveTab::Month => format!("{}月", index + 1),
+        CalendarActiveTab::Weekday => ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            .get(index)
+            .unwrap_or(&"?")
+            .to_string(),
+    }
+}
+
+fn commit_calendar_frames(
+    state: &mut UiState,
+    tab: CalendarActiveTab,
+    inputs: Vec<(usize, (String, Vec<u8>))>,
+) -> Result<(), String> {
+    let item = match tab {
+        CalendarActiveTab::Day => &state.calendar.day,
+        CalendarActiveTab::Month => &state.calendar.month,
+        CalendarActiveTab::Weekday => &state.calendar.weekday,
+    };
+    let CalendarItemDraft::Image { context, .. } = item else {
+        return Err("请先选择图片模式。".into());
+    };
+    if inputs
+        .iter()
+        .any(|(index, _)| *index >= calendar_sequence_count(tab))
+    {
+        return Err("帧索引超出范围。".into());
+    }
+    let mut next_context = context.clone();
+    next_context.resize(calendar_sequence_count(tab), String::new());
+    let input_total = inputs
+        .iter()
+        .try_fold(0usize, |sum, (_, (_, bytes))| sum.checked_add(bytes.len()))
+        .ok_or("序列过大")?;
+    validate_icon_budget(input_total, 0, 0, false)?;
+    // Never overwrite imported paths or shared destinations: new sequences receive a fresh namespace.
+    let key = match tab {
+        CalendarActiveTab::Day => "day",
+        CalendarActiveTab::Month => "month",
+        CalendarActiveTab::Weekday => "weekday",
+    };
+    let mut generation = 0usize;
+    let paths = loop {
+        let paths: Vec<String> = inputs
+            .iter()
+            .map(|(i, _)| format!("calendar/{key}-{generation}/{:02}.bin", i + 1))
+            .collect();
+        if paths.iter().all(|p| {
+            destination_bytes(state, p).is_none()
+                && !state.imported_paths.contains(p)
+                && !state.mappings.iter().any(|m| m.destination == *p)
+                && !context.contains(p)
+        }) {
+            break paths;
+        }
+        generation += 1;
+    };
+    let mut staged = Vec::new();
+    let mut total = workbench_asset_bytes(state);
+    for ((index, (name, bytes)), path) in inputs.into_iter().zip(&paths) {
+        next_context[index] = path.clone();
+        let encoded = if name.to_ascii_lowercase().ends_with(".png")
+            || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        {
+            lvgl::encode_png_argb8888(&bytes)
+                .map_err(|e| e.to_string())?
+                .bytes
+        } else {
+            bytes
+        };
+        app_icons::inspect_bin(&encoded)?;
+        validate_icon_budget(encoded.len(), total, 0, false)?;
+        total += encoded.len();
+        staged.push(encoded);
+    }
+    // All validation precedes mutation; retain old assets, aliases and declarations verbatim.
+    for (path, bytes) in paths.iter().cloned().zip(staged) {
+        state.authored_paths.insert(path.clone());
+        state.replacements.insert(path, bytes);
+    }
+    let item = match tab {
+        CalendarActiveTab::Day => &mut state.calendar.day,
+        CalendarActiveTab::Month => &mut state.calendar.month,
+        CalendarActiveTab::Weekday => &mut state.calendar.weekday,
+    };
+    if let CalendarItemDraft::Image { context, .. } = item {
+        *context = next_context;
+    }
+    state.rule_undo = None;
+    Ok(())
+}
+
+fn parse_calendar_sequence_zip(
+    tab: CalendarActiveTab,
+    bytes: &[u8],
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use std::io::{Cursor, Read};
+    validate_icon_budget(bytes.len(), 0, 0, false)?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("序列 ZIP 无效：{e}"))?;
+    if archive.len() > 128 {
+        return Err("序列 ZIP 条目过多（最多 128 项，包括目录）。".into());
+    }
+    let expected = calendar_sequence_count(tab);
+    let mut entries = BTreeMap::new();
+    let mut names = BTreeSet::new();
+    let mut extension = None;
+    let mut parent = None;
+    let mut total = 0usize;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| format!("读取 ZIP 失败：{e}"))?;
+        let name = file.name().to_string();
+        let path = name.strip_suffix('/').unwrap_or(&name);
+        if path.is_empty()
+            || name.starts_with('/')
+            || name.contains('\\')
+            || name.contains(':')
+            || path.split('/').any(|part| {
+                part.is_empty() || part == "." || part == ".." || part.chars().any(char::is_control)
+            })
+            || !names.insert(name.clone())
+        {
+            return Err("ZIP 包含不安全或重复路径。".into());
+        }
+        if file
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err("ZIP 不允许符号链接。".into());
+        }
+        if file.is_dir() {
+            continue;
+        }
+        let (directory, leaf) = path.rsplit_once('/').unwrap_or(("", path));
+        let (number, ext) = leaf
+            .rsplit_once('.')
+            .ok_or("ZIP 只能包含编号 PNG / BIN 图片")?;
+        if !matches!(ext, "png" | "bin")
+            || number.len() != 2
+            || !number.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("图片必须命名为 01.png…（或统一使用 .bin）。".into());
+        }
+        let ordinal: usize = number.parse().map_err(|_| "无效图片编号")?;
+        if ordinal == 0 || ordinal > expected || entries.contains_key(&ordinal) {
+            return Err("图片编号重复或超出序列范围。".into());
+        }
+        if extension.as_ref().is_some_and(|previous| previous != ext)
+            || parent
+                .as_ref()
+                .is_some_and(|previous| previous != directory)
+        {
+            return Err("所有图片必须位于同一目录，且统一使用 PNG 或 BIN。".into());
+        }
+        extension = Some(ext.to_string());
+        parent = Some(directory.to_string());
+        let remaining = MAX_ICON_BYTES.saturating_sub(total);
+        if file.size() > remaining as u64 {
+            return Err("ZIP 解压素材总量超过 64 MiB。".into());
+        }
+        let mut data = Vec::new();
+        // Enforce the actual decompressed budget even if ZIP metadata is dishonest.
+        (&mut file)
+            .take(remaining as u64 + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| format!("ZIP 解压失败：{e}"))?;
+        if data.len() > remaining {
+            return Err("ZIP 解压素材总量超过 64 MiB。".into());
+        }
+        total += data.len();
+        entries.insert(ordinal, (name, data));
+    }
+    if entries.len() != expected {
+        return Err(format!(
+            "ZIP 必须包含恰好 {expected} 张图片，编号 01–{expected:02}。"
+        ));
+    }
+    Ok(entries.into_values().collect())
+}
+
+async fn begin_calendar_frame_pick(index: usize) {
+    let tab = {
+        let mut state = lock_state();
+        if state.busy
+            || !calendar_sequence_import_visible(state.calendar.current_item())
+            || index >= calendar_sequence_count(state.calendar.active_tab)
+        {
+            return;
+        }
+        let tab = state.calendar.active_tab;
+        state.busy = true;
+        state.error = None;
+        state.status = format!("选择 {} 的 PNG / BIN…", calendar_slot_label(tab, index));
+        tab
+    };
+    render_current();
+    let picked = psys_host::dialog::pick_file(
+        psys_host::dialog::PickConfig {
+            read: true,
+            copy_to: None,
+        },
+        psys_host::dialog::FilterConfig {
+            multiple: false,
+            extensions: vec!["png".into(), "bin".into()],
+            default_directory: String::new(),
+            default_file_name: String::new(),
+        },
+    )
+    .await;
+    let mut state = lock_state();
+    state.busy = false;
+    match picked {
+        Ok(picked) if picked.name.is_empty() => state.status = "已取消；原帧保持不变。".into(),
+        Ok(picked) => {
+            match commit_calendar_frames(&mut state, tab, vec![(index, (picked.name, picked.data))])
+            {
+                Ok(()) => state.status = format!("已设置 {}。", calendar_slot_label(tab, index)),
+                Err(e) => state.error = Some(e),
+            }
+        }
+        Err(e) => state.error = Some(format!("选择帧失败：{e:?}")),
+    }
+    drop(state);
+    render_current();
+}
+
+async fn begin_calendar_sequence_pick() {
+    let tab = {
+        let mut state = lock_state();
+        if state.busy || !calendar_sequence_import_visible(state.calendar.current_item()) {
+            return;
+        }
+        state.busy = true;
+        state.error = None;
+        state.calendar.active_tab
+    };
+    lock_state().status = format!(
+        "选择 {} 图片序列 ZIP（01–{:02}）；取消保留原序列。",
+        tab.name(),
+        calendar_sequence_count(tab)
+    );
+    render_current();
+    let picked = psys_host::dialog::pick_file(
+        psys_host::dialog::PickConfig {
+            read: true,
+            copy_to: None,
+        },
+        psys_host::dialog::FilterConfig {
+            multiple: false,
+            extensions: vec!["zip".into()],
+            default_directory: String::new(),
+            default_file_name: String::new(),
+        },
+    )
+    .await;
+    let mut state = lock_state();
+    state.busy = false;
+    match picked {
+        Ok(picked) if picked.name.is_empty() => {
+            state.status = "已取消序列导入；原素材保持不变。".into()
+        }
+        Ok(picked) => match parse_calendar_sequence_zip(tab, &picked.data)
+            .and_then(|inputs| commit_calendar_sequence(&mut state, tab, inputs))
+        {
+            Ok(()) => state.status = "已按 ZIP 图片编号导入完整序列。".into(),
+            Err(e) => state.error = Some(e),
+        },
+        Err(e) => state.error = Some(format!("选择序列 ZIP 失败：{e:?}")),
+    }
+    drop(state);
+    render_current();
+}
+
+async fn begin_calendar_bg_pick() {
+    {
+        let mut state = lock_state();
+        state.busy = true;
+        state.error = None;
+        state.status = "等待选择 112×112 日历底图（支持 PNG / BIN）…".into();
+    }
+    render_current();
+    let picked = psys_host::dialog::pick_file(
+        psys_host::dialog::PickConfig {
+            read: true,
+            copy_to: None,
+        },
+        psys_host::dialog::FilterConfig {
+            multiple: false,
+            extensions: vec!["png".into(), "bin".into()],
+            default_directory: String::new(),
+            default_file_name: String::new(),
+        },
+    )
+    .await;
+    let mut state = lock_state();
+    state.busy = false;
+    match picked {
+        Ok(picked) if picked.name.is_empty() => {
+            state.status = "已取消日历底图选择。".into();
+        }
+        Ok(picked) => {
+            let name = picked.name;
+            let bytes = picked.data;
+            if let Err(error) = validate_icon_budget(bytes.len(), 0, 0, false) {
+                state.error = Some(error);
+                drop(state);
+                render_current();
+                return;
+            }
+            let is_png =
+                name.to_lowercase().ends_with(".png") || bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+            let encoded_bytes = if is_png {
+                match lvgl::encode_png_argb8888(&bytes) {
+                    Ok(enc) => enc.bytes,
+                    Err(e) => {
+                        state.error = Some(format!("底图 PNG 转换失败：{e}"));
+                        drop(state);
+                        render_current();
+                        return;
+                    }
+                }
+            } else {
+                bytes
+            };
+            match commit_calendar_background(&mut state, encoded_bytes) {
+                Ok(()) => state.status = format!("已设置日历底图：{name}"),
+                Err(error) => state.error = Some(error),
+            }
+        }
+        Err(e) => {
+            state.error = Some(format!("选择底图失败：{e:?}"));
+        }
+    }
+    drop(state);
+    render_current();
+}
+
+const CALENDAR_BACKGROUND: &str = "app/perpetual_calendar/calendar_background_icon.bin";
+const CALENDAR_LAUNCHER: &str = "app/perpetual_calendar/launcher_icon.bin";
+
+fn calendar_background_path(state: &UiState) -> &'static str {
+    // Native Hook uses launcher_icon on Band 11; p67 uses calendar_background_icon.
+    // Prefer actual firmware inventory, then explicit existing rules/target metadata.
+    if let Some(firmware) = &state.firmware {
+        if firmware
+            .files()
+            .iter()
+            .any(|file| file.path == CALENDAR_LAUNCHER)
+        {
+            return CALENDAR_LAUNCHER;
+        }
+        if firmware
+            .files()
+            .iter()
+            .any(|file| file.path == CALENDAR_BACKGROUND)
+        {
+            return CALENDAR_BACKGROUND;
+        }
+    }
+    if state
+        .mappings
+        .iter()
+        .any(|rule| rule.source == format!("/resource/{CALENDAR_LAUNCHER}"))
+        || state.target.contains("band-11")
+    {
+        CALENDAR_LAUNCHER
+    } else {
+        CALENDAR_BACKGROUND
+    }
+}
+
+fn workbench_asset_bytes(state: &UiState) -> usize {
+    let mut sizes = replacement_sizes_by_destination(state)
+        .into_iter()
+        .map(|(path, size)| (path.to_string(), size))
+        .collect::<BTreeMap<_, _>>();
+    for surface in [
+        BgSurface::Launcher,
+        BgSurface::ControlCenter,
+        BgSurface::Notifications,
+        BgSurface::Widgets,
+    ] {
+        if let BgModeDraft::Image {
+            image_path,
+            bytes: Some(bytes),
+            ..
+        } = state.backgrounds.get(surface)
+        {
+            sizes.insert(image_path.clone(), bytes.len());
+        }
+    }
+    sizes.values().sum()
+}
+
+fn commit_calendar_background(state: &mut UiState, bytes: Vec<u8>) -> Result<(), String> {
+    validate_icon_budget(bytes.len(), 0, 0, false)?;
+    let info = app_icons::inspect_bin(&bytes)?;
+    if info.width != 112 || info.height != 112 {
+        return Err("日历底图必须为 112×112。".into());
+    }
+    let path = calendar_background_path(state);
+    let destination = resource_destination(state, path);
+    validate_icon_budget(
+        bytes.len(),
+        workbench_asset_bytes(state),
+        destination_bytes(state, &destination).map_or(0, <[u8]>::len),
+        false,
+    )?;
+    let mut mappings = state.mappings.clone();
+    let source = format!("/resource/{path}");
+    if !mappings.iter().any(|rule| {
+        rule.source == source || (rule.source.ends_with('/') && source.starts_with(&rule.source))
+    }) {
+        mappings.push(Mapping {
+            source,
+            destination,
+        });
+    }
+    validate_ui_mappings(&mappings)?;
+    let mut combined = mappings.clone();
+    for icon in &state.quickapps {
+        combined.push(Mapping {
+            source: app_icons::source(&icon.declaration.package),
+            destination: icon.declaration.destination.clone(),
+        });
+    }
+    let tsv_bytes: usize = combined
+        .iter()
+        .map(|rule| {
+            rule.source.len() + rule.destination.len() + state.theme_id.len() + "themes//".len() + 2
+        })
+        .sum();
+    if combined.len() > 256 || tsv_bytes > 32 * 1024 {
+        return Err("日历底图规则超过 256 条规则 / 32 KiB 配置预算；现有编辑未更改。".into());
+    }
+    set_resource_replacement(state, path, bytes);
+    Ok(())
+}
+
+fn clear_calendar_background(state: &mut UiState) -> Result<(), String> {
+    // Detach only our exact rule. Imported assets and aliases remain authoritative;
+    // a directory mapping cannot safely be cleared as one file without an exception.
+    let source = format!("/resource/{}", calendar_background_path(state));
+    if state
+        .mappings
+        .iter()
+        .any(|rule| rule.source.ends_with('/') && source.starts_with(&rule.source))
+    {
+        return Err("底图由目录规则提供，请在自定义规则中编辑该目录；未删除共享素材。".into());
+    }
+    state.rule_undo = None;
+    state.mappings.retain(|rule| rule.source != source);
+    remove_unreferenced_authored_assets(state);
+    Ok(())
+}
+
 fn parse_version_code(raw: &str) -> Result<Option<u64>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1902,8 +3272,106 @@ fn parse_version_code(raw: &str) -> Result<Option<u64>, String> {
 }
 
 fn build_project_pack(state: &UiState) -> Result<Vec<u8>, String> {
-    let (replacements, mappings, declarations) = export_assets(state)?;
+    let (mut replacements, mappings, declarations) = export_assets(state)?;
     let version_code = parse_version_code(&state.version_code)?;
+
+    let mut bg_decl = crpack::BackgroundsDeclaration::default();
+    let mut has_bg = false;
+    for surface in [
+        BgSurface::Launcher,
+        BgSurface::ControlCenter,
+        BgSurface::Notifications,
+        BgSurface::Widgets,
+    ] {
+        match state.backgrounds.get(surface) {
+            BgModeDraft::System => {}
+            BgModeDraft::Blur => {
+                let setting = Some(crpack::BackgroundSetting::Blur);
+                match surface {
+                    BgSurface::Launcher => bg_decl.launcher = setting,
+                    BgSurface::ControlCenter => bg_decl.control_center = setting,
+                    BgSurface::Notifications => bg_decl.notifications = setting,
+                    BgSurface::Widgets => bg_decl.widgets = setting,
+                }
+                has_bg = true;
+            }
+            BgModeDraft::Image {
+                image_path, bytes, ..
+            } => {
+                if let Some(b) = bytes {
+                    replacements.insert(image_path.clone(), b.as_ref().clone());
+                }
+                let setting = Some(crpack::BackgroundSetting::Image {
+                    image: image_path.clone(),
+                });
+                match surface {
+                    BgSurface::Launcher => bg_decl.launcher = setting,
+                    BgSurface::ControlCenter => bg_decl.control_center = setting,
+                    BgSurface::Notifications => bg_decl.notifications = setting,
+                    BgSurface::Widgets => bg_decl.widgets = setting,
+                }
+                has_bg = true;
+            }
+        }
+    }
+    let backgrounds = if has_bg { Some(bg_decl) } else { None };
+
+    let calendar = if state.calendar.enabled {
+        for (tab, item) in [
+            (CalendarActiveTab::Day, &state.calendar.day),
+            (CalendarActiveTab::Month, &state.calendar.month),
+            (CalendarActiveTab::Weekday, &state.calendar.weekday),
+        ] {
+            if let CalendarItemDraft::Image { context, .. } = item {
+                if context.len() != calendar_sequence_count(tab)
+                    || context.iter().any(|path| !replacements.contains_key(path))
+                {
+                    return Err("日历图片序列素材不完整；请导入完整序列后导出。".into());
+                }
+            }
+        }
+        let to_item = |draft: &CalendarItemDraft| match draft {
+            CalendarItemDraft::None => Some(crpack::CalendarItem::None),
+            CalendarItemDraft::Text {
+                x,
+                y,
+                align,
+                size,
+                color,
+            } => Some(crpack::CalendarItem::Text {
+                x: *x,
+                y: *y,
+                align: *align,
+                size: *size,
+                color: if color.is_empty() {
+                    None
+                } else {
+                    Some(color.clone())
+                },
+                context: vec![],
+            }),
+            CalendarItemDraft::Image {
+                x,
+                y,
+                align,
+                context,
+            } => Some(crpack::CalendarItem::Image {
+                x: *x,
+                y: *y,
+                align: *align,
+                size: 0,
+                context: context.clone(),
+            }),
+        };
+        Some(crpack::CalendarDeclaration {
+            month: to_item(&state.calendar.month),
+            day: to_item(&state.calendar.day),
+            weekday: to_item(&state.calendar.weekday),
+        })
+    } else {
+        None
+    };
+
     crpack::build_crpack_with_mappings(
         &PackOptions {
             theme_id: &state.theme_id,
@@ -1914,6 +3382,8 @@ fn build_project_pack(state: &UiState) -> Result<Vec<u8>, String> {
             description: (!state.description.is_empty()).then_some(state.description.as_str()),
             target: (!state.target.is_empty()).then_some(state.target.as_str()),
             replacements: &replacements,
+            backgrounds: backgrounds.as_ref(),
+            calendar: calendar.as_ref(),
         },
         &mappings,
         &declarations,
@@ -2546,7 +4016,17 @@ async fn begin_export() {
         if state.busy {
             return;
         }
-        if replacement_count(&state) == 0 {
+        if replacement_count(&state) == 0
+            && !state.calendar.enabled
+            && [
+                BgSurface::Launcher,
+                BgSurface::ControlCenter,
+                BgSurface::Notifications,
+                BgSurface::Widgets,
+            ]
+            .iter()
+            .all(|surface| matches!(state.backgrounds.get(*surface), BgModeDraft::System))
+        {
             state.error = Some("请先替换至少一个资源或第三方应用图标。".into());
             drop(state);
             render_current();
@@ -2911,139 +4391,876 @@ fn build_main_ui(state: UiSnapshot) -> ui::Element {
         .padding(12)
         .gap(12);
 
-    if state.firmware_name.is_empty() {
-        let empty = ui::Element::new(ui::ElementType::Card, None)
-            .prop("variant", "surface")
-            .prop("size", "3")
-            .radius(24)
-            .padding(24)
-            .flex()
-            .flex_direction(ui::FlexDirection::Column)
-            .align_start()
-            .gap(12)
-            .child(text("编辑资源包", 20))
-            .child(text(
-                "直接添加运行时文件规则或第三方图标，无需固件。选择官方 OTA 固件可建立只读资源树，辅助查找原始资源和图片模板。",
-                14,
-            ))
-            .child(button("选择手环固件", "firmware.upload", "solid", "accent").disabled_if(state.busy))
-            .child(text("导入 CRPack 会替换当前项目；加载或更换固件保留全部规则与文件，原固件编辑作为待验证规则保留。", 12))
-            .child(
-                ui::Element::new(ui::ElementType::Div, None).flex().gap(8)
-                    .child(button("导入 .crpack", "pack.import", "soft", "gray").disabled_if(state.busy))
-                    .child(button("导出 .crpack", "pack.export", "solid", "accent").disabled_if(state.busy || state.replacement_count == 0))
-                    .child(badge(&format!("已替换 {}（第三方图标 {}）", state.replacement_count, state.icon_replacement_count), "accent")),
-            );
-        root = root.child(empty);
-    } else {
-        let upload = button(
-            if state.busy {
-                "处理中…"
-            } else {
-                "更换固件"
-            },
-            "firmware.upload",
-            "soft",
-            "gray",
-        )
-        .disabled_if(state.busy)
-        .width_full();
-
-        let import = button(
-            if state.busy {
-                "处理中…"
-            } else {
-                "导入 .crpack"
-            },
-            "pack.import",
-            "soft",
-            "gray",
-        )
-        .disabled_if(state.busy)
-        .width_full();
-
-        let export = button(
-            if state.busy {
-                "处理中…"
-            } else {
-                "导出 .crpack"
-            },
-            "pack.export",
-            "solid",
-            "accent",
-        )
-        .disabled_if(state.busy || state.replacement_count == 0)
-        .width_full();
-
-        let actions = ui::Element::new(ui::ElementType::Grid, None)
-            .grid_template_columns("repeat(3, 1fr)")
+    let feature_edits = state.calendar.enabled
+        || [
+            BgSurface::Launcher,
+            BgSurface::ControlCenter,
+            BgSurface::Notifications,
+            BgSurface::Widgets,
+        ]
+        .iter()
+        .any(|surface| !matches!(state.backgrounds.get(*surface), BgModeDraft::System));
+    root = root.child(
+        ui::Element::new(ui::ElementType::Grid, None)
+            .grid_template_columns("repeat(auto-fit, minmax(min(100%, 120px), 1fr))")
             .gap(8)
-            .width_full()
-            .child(upload)
-            .child(import)
-            .child(export);
-
-        let display_name = format_firmware_name(&state.firmware_name);
-        let summary = ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .flex_direction(ui::FlexDirection::Row)
-            .width_full()
-            .align_center()
-            .gap(8)
+            .child(text("资源包工作台", 18))
             .child(
-                ui::Element::new(ui::ElementType::Div, None)
-                    .flex()
-                    .flex_direction(ui::FlexDirection::Row)
-                    .align_center()
-                    .gap(6)
-                    .flex_grow(1.0)
-                    .child(span("📦", 14))
-                    .child(span(&display_name, 14).prop("title", &state.firmware_name)),
+                button(
+                    if state.firmware_name.is_empty() {
+                        "选择固件"
+                    } else {
+                        "更换固件"
+                    },
+                    "firmware.upload",
+                    "soft",
+                    "gray",
+                )
+                .disabled_if(state.busy),
             )
-            .child(badge(&format!("{} 个文件", state.file_count), "gray"))
-            .child(badge(
-                &format!(
-                    "已替换 {}（图标 {}）",
-                    state.replacement_count, state.icon_replacement_count
-                ),
-                if state.replacement_count > 0 {
+            .child(button("导入 .crpack", "pack.import", "soft", "gray").disabled_if(state.busy))
+            .child(
+                button("导出 .crpack", "pack.export", "solid", "accent")
+                    .disabled_if(state.busy || (state.replacement_count == 0 && !feature_edits)),
+            ),
+    );
+    let mut navigation = ui::Element::new(ui::ElementType::Grid, None)
+        .grid_template_columns("repeat(auto-fit, minmax(min(100%, 160px), 1fr))")
+        .gap(8);
+    for tab in [
+        WorkbenchTab::Resources,
+        WorkbenchTab::Backgrounds,
+        WorkbenchTab::Calendar,
+        WorkbenchTab::Metadata,
+    ] {
+        navigation = navigation.child(
+            button(
+                tab.name(),
+                &format!("tab:{}", tab.key()),
+                if tab == state.workbench_tab {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if tab == state.workbench_tab {
                     "accent"
                 } else {
                     "gray"
                 },
-            ));
-
-        let toolbar = ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .flex_direction(ui::FlexDirection::Column)
-            .width_full()
-            .gap(8)
-            .child(summary)
-            .child(actions)
-            .child(text(
-                "导入 CRPack 会替换当前项目；更换固件保留全部编辑，旧资源规则仍需设备验证。",
-                12,
-            ));
-
-        root = root.child(toolbar);
-
-        let browser = build_browser(&state);
-        let inspector = build_inspector(&state);
-        let workspace = ui::Element::new(ui::ElementType::Grid, None)
-            .grid_template_columns("repeat(auto-fit, minmax(min(100%, 340px), 1fr))")
-            .gap(12)
-            .width_full()
-            .child(browser)
-            .child(inspector);
-        root = root.child(workspace);
+            )
+            .disabled_if(state.busy),
+        );
     }
-
-    root = root.child(build_custom_rules(&state));
-    root = root.child(build_app_icons(&state));
-    if state.firmware_name.is_empty() {
-        root = root.child(build_inspector(&state));
-    }
+    root = root.child(navigation).child(text(
+        &format!(
+            "{} · {} 个固件文件 · {} 项替换（图标 {}）",
+            if state.firmware_name.is_empty() {
+                "未加载固件".into()
+            } else {
+                format_firmware_name(&state.firmware_name)
+            },
+            state.file_count,
+            state.replacement_count,
+            state.icon_replacement_count
+        ),
+        12,
+    ));
+    root = match state.workbench_tab {
+        WorkbenchTab::Resources => {
+            let mut resources = root.child(
+                ui::Element::new(ui::ElementType::Grid, None)
+                    .grid_template_columns("repeat(auto-fit, minmax(min(100%, 340px), 1fr))")
+                    .gap(12)
+                    .child(build_browser(&state))
+                    .child(build_inspector(&state)),
+            );
+            resources = resources.child(
+                button(
+                    if state.custom_expanded {
+                        "收起自定义规则"
+                    } else {
+                        "展开自定义规则"
+                    },
+                    "resources.custom.toggle",
+                    "soft",
+                    "gray",
+                )
+                .prop(
+                    "aria-expanded",
+                    if state.custom_expanded {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
+            );
+            if state.custom_expanded {
+                resources = resources.child(build_custom_rules(&state));
+            }
+            resources = resources.child(
+                button(
+                    if state.apps_expanded {
+                        "收起应用图标"
+                    } else {
+                        "展开应用图标"
+                    },
+                    "resources.apps.toggle",
+                    "soft",
+                    "gray",
+                )
+                .prop(
+                    "aria-expanded",
+                    if state.apps_expanded { "true" } else { "false" },
+                ),
+            );
+            if state.apps_expanded {
+                resources = resources.child(build_app_icons(&state));
+            }
+            resources
+        }
+        WorkbenchTab::Backgrounds => root.child(build_system_backgrounds(&state)),
+        WorkbenchTab::Calendar => root.child(build_calendar_studio(&state)),
+        WorkbenchTab::Metadata => root.child(build_metadata(&state)),
+    };
     root.child(build_status(&state))
+}
+
+fn build_system_backgrounds(state: &UiSnapshot) -> ui::Element {
+    let mut grid = ui::Element::new(ui::ElementType::Grid, None)
+        .grid_template_columns("repeat(auto-fit, minmax(min(100%, 280px), 1fr))")
+        .gap(12);
+    for surface in [
+        BgSurface::Launcher,
+        BgSurface::ControlCenter,
+        BgSurface::Notifications,
+        BgSurface::Widgets,
+    ] {
+        grid = grid.child(build_background_card(state, surface));
+    }
+    grid
+}
+
+fn build_background_card(state: &UiSnapshot, current_surface: BgSurface) -> ui::Element {
+    let current_mode = state.backgrounds.get(current_surface);
+
+    let mode_selector = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .gap(8)
+        .align_center()
+        .child(
+            button(
+                "原生",
+                &format!("bg.set:{}:system", current_surface.key()),
+                if matches!(current_mode, BgModeDraft::System) {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if matches!(current_mode, BgModeDraft::System) {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button(
+                "模糊",
+                &format!("bg.set:{}:blur", current_surface.key()),
+                if matches!(current_mode, BgModeDraft::Blur) {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if matches!(current_mode, BgModeDraft::Blur) {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button(
+                "壁纸",
+                &format!("bg.set:{}:image", current_surface.key()),
+                if matches!(current_mode, BgModeDraft::Image { .. }) {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if matches!(current_mode, BgModeDraft::Image { .. }) {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        );
+
+    let mut details = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .gap(8)
+        .width_full();
+
+    match current_mode {
+        BgModeDraft::System => {
+            details = details.child(text("当前使用系统原生黑色/默认底色，无需额外资源。", 13));
+        }
+        BgModeDraft::Blur => {
+            details = details.child(text(
+                "使用 Hook 模块提供的背景模糊；实际效果需在设备上验证。",
+                13,
+            ));
+        }
+        BgModeDraft::Image {
+            image_path,
+            bytes,
+            preview_uri,
+        } => {
+            details = details.child(text(
+                &format!("包内壁纸路径：{image_path}（建议图片分辨率为 336×480）"),
+                13,
+            ));
+            let mut actions = ui::Element::new(ui::ElementType::Div, None).flex().gap(8);
+            actions = actions.child(
+                button(
+                    "选择 PNG / BIN 壁纸",
+                    &format!("bg.pick:{}", current_surface.key()),
+                    "solid",
+                    "accent",
+                )
+                .disabled_if(state.busy),
+            );
+            if bytes.is_some() {
+                actions = actions.child(
+                    button(
+                        "清除壁纸",
+                        &format!("bg.clear:{}", current_surface.key()),
+                        "ghost",
+                        "gray",
+                    )
+                    .disabled_if(state.busy),
+                );
+            }
+            details = details.child(actions);
+            if let Some(uri) = preview_uri {
+                let img = ui::Element::new(ui::ElementType::Image, Some(uri))
+                    .prop("alt", "壁纸预览")
+                    .prop("width", "168")
+                    .prop("height", "240")
+                    .radius(12);
+                details = details.child(img);
+            } else if let Some(b) = bytes {
+                details = details.child(badge(
+                    &format!("已载入壁纸文件 · {}", format_bytes(b.len())),
+                    "accent",
+                ));
+            }
+        }
+    }
+
+    ui::Element::new(ui::ElementType::Card, None)
+        .prop("variant", "surface")
+        .prop("size", "2")
+        .radius(24)
+        .padding(14)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(10)
+        .child(text(current_surface.name(), 17))
+        .child(mode_selector)
+        .child(details)
+}
+
+fn valid_calendar_size(size: u32) -> bool {
+    size == 0 || (8..=72).contains(&size)
+}
+
+fn calendar_preview_anchor(x: i32, y: i32, align: crpack::CalendarAlign) -> (u32, u32, String) {
+    let (left, top, shift) = match align {
+        crpack::CalendarAlign::TopLeft => (0, 0, "translate(0%, 0%)"),
+        crpack::CalendarAlign::TopMid => (56, 0, "translate(-50%, 0%)"),
+        crpack::CalendarAlign::TopRight => (112, 0, "translate(-100%, 0%)"),
+        crpack::CalendarAlign::Center => (56, 56, "translate(-50%, -50%)"),
+    };
+    // Host offsets are unsigned; signed device offsets use the supported transform API.
+    (left, top, format!("{shift} translate({x}px, {y}px)"))
+}
+
+fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
+    let cal = &state.calendar;
+    let enabled = cal.enabled;
+
+    let header = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .align_center()
+        .gap(8)
+        .child(text("📅 动态日历图标工坊 (Dynamic Calendar Studio)", 17).flex_grow(1.0))
+        .child(
+            button(
+                if enabled {
+                    "关闭自定义日历"
+                } else {
+                    "启用自定义日历"
+                },
+                "calendar.toggle",
+                if enabled { "soft" } else { "solid" },
+                if enabled { "gray" } else { "accent" },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button("重置默认排版", "calendar.reset", "ghost", "gray")
+                .disabled_if(state.busy || !enabled),
+        );
+
+    let mut card = ui::Element::new(ui::ElementType::Card, None)
+        .prop("variant", "surface")
+        .prop("size", "2")
+        .radius(24)
+        .padding(14)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .width_full()
+        .gap(10)
+        .child(header)
+        .child(text(
+            "112×112 逻辑像素布局预览；宿主字体与设备渲染可能不同，请在设备验证。",
+            13,
+        ));
+
+    if !enabled {
+        card = card.child(text(
+            "未启用自定义日历：手环将遵循系统默认日历排版与原生图标。",
+            13,
+        ));
+        return card;
+    }
+
+    let tabs = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .gap(6)
+        .child(
+            button(
+                "📅 日期 (Day)",
+                "calendar.tab:day",
+                if cal.active_tab == CalendarActiveTab::Day {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if cal.active_tab == CalendarActiveTab::Day {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button(
+                "🌙 月份 (Month)",
+                "calendar.tab:month",
+                if cal.active_tab == CalendarActiveTab::Month {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if cal.active_tab == CalendarActiveTab::Month {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button(
+                "📆 星期 (Weekday)",
+                "calendar.tab:weekday",
+                if cal.active_tab == CalendarActiveTab::Weekday {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if cal.active_tab == CalendarActiveTab::Weekday {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        );
+
+    let cur_item = cal.current_item();
+    let cur_type_str = match cur_item {
+        CalendarItemDraft::None => "none",
+        CalendarItemDraft::Text { .. } => "text",
+        CalendarItemDraft::Image { .. } => "image",
+    };
+
+    let type_selector = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .gap(6)
+        .child(
+            button(
+                "不显示 (None)",
+                "calendar.type:none",
+                if cur_type_str == "none" {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if cur_type_str == "none" {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button(
+                "文字排版 (Text)",
+                "calendar.type:text",
+                if cur_type_str == "text" {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if cur_type_str == "text" {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button(
+                "切图序列 (Image)",
+                "calendar.type:image",
+                if cur_type_str == "image" {
+                    "solid"
+                } else {
+                    "soft"
+                },
+                if cur_type_str == "image" {
+                    "accent"
+                } else {
+                    "gray"
+                },
+            )
+            .disabled_if(state.busy),
+        );
+
+    let mut props_panel = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .gap(8)
+        .width_full();
+
+    match cur_item {
+        CalendarItemDraft::None => {
+            props_panel = props_panel.child(text("此元素在日历图标中将被隐藏。", 13));
+        }
+        CalendarItemDraft::Text {
+            x,
+            y,
+            align,
+            size,
+            color,
+        } => {
+            let align_str = match align {
+                crpack::CalendarAlign::TopLeft => "top_left",
+                crpack::CalendarAlign::TopMid => "top_mid",
+                crpack::CalendarAlign::TopRight => "top_right",
+                crpack::CalendarAlign::Center => "center",
+            };
+            let align_row = ui::Element::new(ui::ElementType::Div, None)
+                .flex()
+                .align_center()
+                .gap(6)
+                .child(text("对齐方式：", 12))
+                .child(button(
+                    "居中",
+                    "calendar.align:center",
+                    if align_str == "center" {
+                        "solid"
+                    } else {
+                        "soft"
+                    },
+                    if align_str == "center" {
+                        "accent"
+                    } else {
+                        "gray"
+                    },
+                ))
+                .child(button(
+                    "中上",
+                    "calendar.align:top_mid",
+                    if align_str == "top_mid" {
+                        "solid"
+                    } else {
+                        "soft"
+                    },
+                    if align_str == "top_mid" {
+                        "accent"
+                    } else {
+                        "gray"
+                    },
+                ))
+                .child(button(
+                    "左上",
+                    "calendar.align:top_left",
+                    if align_str == "top_left" {
+                        "solid"
+                    } else {
+                        "soft"
+                    },
+                    if align_str == "top_left" {
+                        "accent"
+                    } else {
+                        "gray"
+                    },
+                ))
+                .child(button(
+                    "右上",
+                    "calendar.align:top_right",
+                    if align_str == "top_right" {
+                        "solid"
+                    } else {
+                        "soft"
+                    },
+                    if align_str == "top_right" {
+                        "accent"
+                    } else {
+                        "gray"
+                    },
+                ));
+
+            let x_row = ui::Element::new(ui::ElementType::Div, None)
+                .flex()
+                .align_center()
+                .gap(6)
+                .child(field("水平偏移 X", &x.to_string(), "calendar.x", "0"))
+                .child(button("-5", "calendar.x:dec_5", "soft", "gray"))
+                .child(button("-1", "calendar.x:dec_1", "soft", "gray"))
+                .child(button("+1", "calendar.x:inc_1", "soft", "gray"))
+                .child(button("+5", "calendar.x:inc_5", "soft", "gray"));
+
+            let y_row = ui::Element::new(ui::ElementType::Div, None)
+                .flex()
+                .align_center()
+                .gap(6)
+                .child(field("垂直偏移 Y", &y.to_string(), "calendar.y", "0"))
+                .child(button("-5", "calendar.y:dec_5", "soft", "gray"))
+                .child(button("-1", "calendar.y:dec_1", "soft", "gray"))
+                .child(button("+1", "calendar.y:inc_1", "soft", "gray"))
+                .child(button("+5", "calendar.y:inc_5", "soft", "gray"));
+
+            let size_row = ui::Element::new(ui::ElementType::Div, None)
+                .flex()
+                .align_center()
+                .gap(6)
+                .child(field(
+                    "字号（0 或 8–72）",
+                    &size.to_string(),
+                    "calendar.size",
+                    "0",
+                ))
+                .child(button("-2", "calendar.size:dec_2", "soft", "gray"))
+                .child(button("+2", "calendar.size:inc_2", "soft", "gray"))
+                .child(button("默认(0)", "calendar.size:reset", "ghost", "gray"));
+
+            let color_field = field(
+                "字体颜色 HEX (例如 #FFFFFF / #FFCC00)",
+                color,
+                "calendar.color",
+                "#FFFFFF",
+            );
+
+            props_panel = props_panel
+                .child(align_row)
+                .child(x_row)
+                .child(y_row)
+                .child(size_row)
+                .child(color_field);
+        }
+        CalendarItemDraft::Image { context, x, y, .. } => {
+            props_panel = props_panel
+                .child(field("水平偏移 X", &x.to_string(), "calendar.x", "0"))
+                .child(field("垂直偏移 Y", &y.to_string(), "calendar.y", "0"))
+                .child(
+                    ui::Element::new(ui::ElementType::Div, None)
+                        .flex()
+                        .gap(6)
+                        .child(button("X −1", "calendar.x:dec_1", "soft", "gray"))
+                        .child(button("X +1", "calendar.x:inc_1", "soft", "gray"))
+                        .child(button("Y −1", "calendar.y:dec_1", "soft", "gray"))
+                        .child(button("Y +1", "calendar.y:inc_1", "soft", "gray")),
+                )
+                .child(
+                    ui::Element::new(ui::ElementType::Div, None)
+                        .flex()
+                        .gap(6)
+                        .child(button("居中", "calendar.align:center", "soft", "gray"))
+                        .child(button("中上", "calendar.align:top_mid", "soft", "gray"))
+                        .child(button("左上", "calendar.align:top_left", "soft", "gray"))
+                        .child(button("右上", "calendar.align:top_right", "soft", "gray")),
+                );
+            let expected = match cal.active_tab {
+                CalendarActiveTab::Month => 12,
+                CalendarActiveTab::Day => 31,
+                CalendarActiveTab::Weekday => 7,
+            };
+            let ready = context
+                .iter()
+                .filter(|path| state.replacement_sizes.contains_key(*path))
+                .count();
+            props_panel = props_panel
+                .child(button("导入图片序列 ZIP", "calendar.pick.sequence", "solid", "accent").disabled_if(state.busy))
+                .child(text("可逐帧选择 PNG / BIN；下方即导出顺序。ZIP 可选：01–31（日）、01–12（月）、01–07（周一–周日），同目录、统一 PNG 或 BIN。", 13))
+                .child(text(
+                    &format!("切图序列模式：需要提供恰好 {} 张切图", expected),
+                    13,
+                ))
+                .child(badge(
+                    &format!("当前素材：{}/{} 张已就绪", ready, expected),
+                    if context.len() == expected && ready == expected {
+                        "accent"
+                    } else {
+                        "gray"
+                    },
+                ));
+            let mut grid = ui::Element::new(ui::ElementType::Grid, None)
+                .grid_template_columns("repeat(auto-fit, minmax(min(100%, 180px), 1fr))")
+                .gap(8)
+                .width_full();
+            for index in 0..expected {
+                let path = context.get(index).filter(|p| !p.is_empty());
+                let mut slot = ui::Element::new(ui::ElementType::Div, None)
+                    .flex()
+                    .flex_direction(ui::FlexDirection::Column)
+                    .gap(4)
+                    .child(text(
+                        &format!(
+                            "{:02} · {}",
+                            index + 1,
+                            calendar_slot_label(cal.active_tab, index)
+                        ),
+                        13,
+                    ));
+                if let Some(uri) = path.and_then(|p| state.calendar_image_previews.get(p)) {
+                    slot = slot.child(
+                        ui::Element::new(ui::ElementType::Image, Some(uri))
+                            .width(48)
+                            .height(48)
+                            .prop("alt", "帧预览"),
+                    );
+                }
+                slot = slot
+                    .child(text(
+                        path.map(String::as_str).unwrap_or("空槽 · 未选择"),
+                        12,
+                    ))
+                    .child(
+                        button(
+                            if path.is_some() {
+                                "替换 PNG / BIN"
+                            } else {
+                                "选择 PNG / BIN"
+                            },
+                            &format!("calendar.pick.frame:{index}"),
+                            "soft",
+                            "gray",
+                        )
+                        .disabled_if(state.busy),
+                    );
+                grid = grid.child(slot);
+            }
+            props_panel = props_panel.child(
+                ui::Element::new(ui::ElementType::ScrollArea, None)
+                    .prop("type", "auto")
+                    .prop("scrollbars", "vertical")
+                    .height(320)
+                    .width_full()
+                    .child(grid),
+            );
+        }
+    }
+
+    let right_column = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .gap(8)
+        .width_full()
+        .child(tabs)
+        .child(type_selector)
+        .child(props_panel);
+
+    let weekday_name = match cal.test_weekday % 7 {
+        0 => "周一",
+        1 => "周二",
+        2 => "周三",
+        3 => "周四",
+        4 => "周五",
+        5 => "周六",
+        _ => "周日",
+    };
+
+    let mut preview_box = ui::Element::new(ui::ElementType::Div, None)
+        .width(112)
+        .height(112)
+        .relative()
+        .bg("#161618")
+        .radius(12);
+
+    if let Some(uri) = &state.calendar_bg_preview_uri {
+        preview_box = preview_box.child(
+            ui::Element::new(ui::ElementType::Image, Some(uri.as_str()))
+                .prop("alt", "日历底图")
+                .absolute()
+                .top(0)
+                .left(0)
+                .width(112)
+                .height(112)
+                .radius(12),
+        );
+    }
+
+    if cal.show_guides {
+        preview_box = preview_box
+            .child(
+                ui::Element::new(ui::ElementType::Div, None)
+                    .absolute()
+                    .left(56)
+                    .top(0)
+                    .width(1)
+                    .height(112)
+                    .bg("#777777"),
+            )
+            .child(
+                ui::Element::new(ui::ElementType::Div, None)
+                    .absolute()
+                    .left(0)
+                    .top(56)
+                    .width(112)
+                    .height(1)
+                    .bg("#777777"),
+            );
+    }
+    for (item, label, native_size) in [
+        (&cal.weekday, weekday_name.to_string(), 11),
+        (&cal.day, cal.test_day.to_string(), 28),
+        (&cal.month, format!("{}月", cal.test_month), 11),
+    ] {
+        if let CalendarItemDraft::Text {
+            x,
+            y,
+            align,
+            size,
+            color,
+        } = item
+        {
+            let (left, top, shift) = calendar_preview_anchor(*x, *y, *align);
+            preview_box = preview_box.child(
+                text(&label, if *size == 0 { native_size } else { *size })
+                    .absolute()
+                    .left(left)
+                    .top(top)
+                    .transform(&shift)
+                    .text_color(if color.is_empty() { "#FFFFFF" } else { color }),
+            );
+        }
+    }
+
+    for (item, index) in [
+        (&cal.day, cal.test_day.saturating_sub(1) as usize),
+        (&cal.month, cal.test_month.saturating_sub(1) as usize),
+        (&cal.weekday, (cal.test_weekday % 7) as usize),
+    ] {
+        if let CalendarItemDraft::Image {
+            context,
+            x,
+            y,
+            align,
+        } = item
+            && let Some(path) = context.get(index)
+            && let Some(uri) = state.calendar_image_previews.get(path)
+        {
+            let (left, top, shift) = calendar_preview_anchor(*x, *y, *align);
+            preview_box = preview_box.child(
+                ui::Element::new(ui::ElementType::Image, Some(uri))
+                    .prop("alt", path)
+                    .absolute()
+                    .left(left)
+                    .top(top)
+                    .transform(&shift),
+            );
+        }
+    }
+
+    let test_bar = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .align_center()
+        .gap(6)
+        .child(button("前一天", "calendar.test.prev_day", "soft", "gray"))
+        .child(text(
+            &format!("测试: {}日 {}", cal.test_day, weekday_name),
+            12,
+        ))
+        .child(button("后一天", "calendar.test.next_day", "soft", "gray"));
+
+    let left_column = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .align_center()
+        .gap(10)
+        .child(preview_box)
+        .child(
+            button(
+                if cal.show_guides {
+                    "隐藏参考线"
+                } else {
+                    "显示参考线"
+                },
+                "calendar.guides.toggle",
+                "soft",
+                "gray",
+            )
+            .disabled_if(state.busy),
+        )
+        .child(
+            button("经典居中", "calendar.preset:classic", "soft", "gray").disabled_if(state.busy),
+        )
+        .child(
+            button("极简大日", "calendar.preset:minimal", "soft", "gray").disabled_if(state.busy),
+        )
+        .child(
+            button("三行布局", "calendar.preset:three_rows", "soft", "gray")
+                .disabled_if(state.busy),
+        )
+        .child(
+            button("选择 112×112 底图", "calendar.pick.bg", "soft", "gray").disabled_if(state.busy),
+        )
+        .child(button("移除底图规则", "calendar.clear.bg", "ghost", "gray").disabled_if(state.busy))
+        .child(test_bar);
+
+    let layout = ui::Element::new(ui::ElementType::Grid, None)
+        .grid_template_columns("repeat(auto-fit, minmax(min(100%, 260px), 1fr))")
+        .gap(12)
+        .width_full()
+        .child(left_column)
+        .child(right_column);
+
+    card.child(layout)
 }
 
 fn build_custom_rules(state: &UiSnapshot) -> ui::Element {
@@ -4094,10 +6311,17 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
         content = content.child(text("选择左侧文件；图片资源会显示预览。", 14));
     }
 
-    if !state.firmware_name.is_empty() {
-        content = content.child(ui::Element::new(ui::ElementType::Separator, None));
-        content = content.child(text("资源包信息", 15));
-    }
+    ui::Element::new(ui::ElementType::Card, None)
+        .padding(14)
+        .child(content)
+}
+
+fn build_metadata(state: &UiSnapshot) -> ui::Element {
+    let mut content = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .gap(10)
+        .child(text("资源包信息", 17));
     let metadata = ui::Element::new(ui::ElementType::Grid, None)
         .grid_template_columns("repeat(auto-fit, minmax(min(100%, 180px), 1fr))")
         .gap(8)
@@ -4157,7 +6381,10 @@ fn build_status(state: &UiSnapshot) -> ui::Element {
 }
 
 fn field(label: &str, value: &str, event_id: &str, placeholder: &str) -> ui::Element {
+    let numeric = matches!(event_id, "calendar.x" | "calendar.y" | "calendar.size");
     let input = ui::Element::new(ui::ElementType::Input, Some(value))
+        .prop("type", if numeric { "number" } else { "text" })
+        .prop("aria-label", label)
         .prop("placeholder", placeholder)
         .prop("size", "2")
         .prop("variant", "surface")
@@ -4247,6 +6474,387 @@ mod tests {
         data[112..120].copy_from_slice(b"test.bin");
         data[128..].copy_from_slice(contents);
         FirmwareIndex::from_firmware(data).unwrap()
+    }
+
+    #[test]
+    fn calendar_single_slots_are_atomic_and_incomplete_export_is_blocked() {
+        assert_eq!(calendar_slot_label(CalendarActiveTab::Day, 30), "31日");
+        assert_eq!(calendar_slot_label(CalendarActiveTab::Month, 11), "12月");
+        for (index, label) in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                calendar_slot_label(CalendarActiveTab::Weekday, index),
+                *label
+            );
+        }
+        let mut state = UiState::default();
+        state.calendar.enabled = true;
+        state.calendar.day = CalendarItemDraft::Image {
+            context: vec![],
+            x: 0,
+            y: 0,
+            align: crpack::CalendarAlign::TopMid,
+        };
+        commit_calendar_frames(
+            &mut state,
+            CalendarActiveTab::Day,
+            vec![(30, ("frame.bin".into(), calendar_bin()))],
+        )
+        .unwrap();
+        assert!(build_project_pack(&state).is_err());
+        let old = state.calendar.day.clone();
+        let assets = state.replacements.clone();
+        let paths = state.authored_paths.clone();
+        assert!(
+            commit_calendar_frames(
+                &mut state,
+                CalendarActiveTab::Day,
+                vec![(30, ("bad.bin".into(), vec![0]))]
+            )
+            .is_err()
+        );
+        assert!(
+            commit_calendar_frames(
+                &mut state,
+                CalendarActiveTab::Day,
+                vec![(30, ("big.bin".into(), vec![0; MAX_ICON_BYTES + 1]))]
+            )
+            .is_err()
+        );
+        assert_eq!(state.calendar.day, old);
+        assert_eq!(state.replacements, assets);
+        assert_eq!(state.authored_paths, paths);
+        commit_calendar_frames(
+            &mut state,
+            CalendarActiveTab::Day,
+            vec![(30, ("new.bin".into(), calendar_bin()))],
+        )
+        .unwrap();
+        for (path, bytes) in assets {
+            assert_eq!(state.replacements.get(&path), Some(&bytes));
+        }
+    }
+
+    fn calendar_bin() -> Vec<u8> {
+        let mut bytes = vec![0; 12 + 112 * 112 * 4];
+        bytes[..12].copy_from_slice(&[0x19, 0x10, 0, 0, 112, 0, 112, 0, 0xc0, 1, 0, 0]);
+        bytes
+    }
+
+    fn sequence_zip(entries: Vec<(String, Vec<u8>)>) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            writer
+                .start_file(
+                    name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn sequence_zip_orders_numbered_images_and_rejects_bad_archives_atomically() {
+        for tab in [
+            CalendarActiveTab::Day,
+            CalendarActiveTab::Month,
+            CalendarActiveTab::Weekday,
+        ] {
+            let count = calendar_sequence_count(tab);
+            let entries = (1..=count)
+                .rev()
+                .map(|i| {
+                    let mut bytes = calendar_bin();
+                    bytes[12] = i as u8;
+                    (format!("images/{i:02}.bin"), bytes)
+                })
+                .collect::<Vec<_>>();
+            let inputs = parse_calendar_sequence_zip(tab, &sequence_zip(entries.clone())).unwrap();
+            for (i, (_, bytes)) in inputs.iter().enumerate() {
+                assert_eq!(bytes[12], (i + 1) as u8);
+            }
+            let mut state = UiState::default();
+            state.calendar.active_tab = tab;
+            *state.calendar.current_item_mut() = CalendarItemDraft::Image {
+                x: 0,
+                y: 0,
+                align: crpack::CalendarAlign::TopMid,
+                context: vec![],
+            };
+            commit_calendar_sequence(&mut state, tab, inputs).unwrap();
+            let before = state.replacements.clone();
+            let item = state.calendar.current_item().clone();
+            let mut cases = vec![entries[..count - 1].to_vec()];
+            for name in [
+                "../01.bin",
+                "images/01.png",
+                "images/readme.txt",
+                "other/01.bin",
+                "images/1.bin",
+                "images/00.bin",
+            ] {
+                let mut bad = entries.clone();
+                bad[0].0 = name.into();
+                cases.push(bad);
+            }
+            for bad in cases {
+                assert!(parse_calendar_sequence_zip(tab, &sequence_zip(bad)).is_err());
+                assert_eq!(state.replacements, before);
+                assert_eq!(state.calendar.current_item(), &item);
+            }
+            let mut invalid = entries.clone();
+            invalid[0].1 = b"invalid image".to_vec();
+            let parsed = parse_calendar_sequence_zip(tab, &sequence_zip(invalid)).unwrap();
+            assert!(commit_calendar_sequence(&mut state, tab, parsed).is_err());
+            assert_eq!(state.replacements, before);
+            assert_eq!(state.calendar.current_item(), &item);
+        }
+        assert!(parse_calendar_sequence_zip(CalendarActiveTab::Weekday, b"not a zip").is_err());
+        assert!(
+            parse_calendar_sequence_zip(CalendarActiveTab::Weekday, &vec![0; MAX_ICON_BYTES + 1])
+                .is_err()
+        );
+        let bomb = sequence_zip(vec![("01.bin".into(), vec![0; MAX_ICON_BYTES + 1])]);
+        assert!(parse_calendar_sequence_zip(CalendarActiveTab::Weekday, &bomb).is_err());
+    }
+
+    #[test]
+    fn sequence_import_visibility_tracks_image_mode() {
+        assert!(!calendar_sequence_import_visible(&CalendarItemDraft::None));
+        assert!(!calendar_sequence_import_visible(
+            &CalendarDraft::default().day
+        ));
+        assert!(calendar_sequence_import_visible(
+            &CalendarItemDraft::Image {
+                x: 0,
+                y: 0,
+                align: crpack::CalendarAlign::TopMid,
+                context: vec![]
+            }
+        ));
+        // AstroBox UI Element construction requires the host, so native tests cover
+        // the mode discriminants used by the builders rather than a host element tree.
+    }
+
+    #[test]
+    fn calendar_sequences_are_ordered_atomic_and_roundtrip() {
+        for tab in [
+            CalendarActiveTab::Day,
+            CalendarActiveTab::Month,
+            CalendarActiveTab::Weekday,
+        ] {
+            let mut state = UiState::default();
+            state.calendar.enabled = true;
+            state.calendar.active_tab = tab;
+            *state.calendar.current_item_mut() = CalendarItemDraft::Image {
+                x: 3,
+                y: 5,
+                align: crpack::CalendarAlign::TopMid,
+                context: vec![],
+            };
+            assert!(build_project_pack(&state).is_err());
+            let count = calendar_sequence_count(tab);
+            let inputs = (0..count)
+                .map(|i| {
+                    let mut b = calendar_bin();
+                    b[12] = i as u8;
+                    (format!("{}.bin", count - i), b)
+                })
+                .collect::<Vec<_>>();
+            commit_calendar_sequence(&mut state, tab, inputs.clone()).unwrap();
+            let old = state.calendar.current_item().clone();
+            let paths = match &old {
+                CalendarItemDraft::Image { context, .. } => context.clone(),
+                _ => unreachable!(),
+            };
+            for (i, path) in paths.iter().enumerate() {
+                assert_eq!(state.replacements[path][12], i as u8);
+            }
+            state.imported_paths.insert(paths[0].clone());
+            state.mappings.push(Mapping {
+                source: "/shared.bin".into(),
+                destination: paths[0].clone(),
+            });
+            let before = state.replacements.clone();
+            let mappings = state.mappings.clone();
+            assert!(
+                commit_calendar_sequence(&mut state, tab, inputs[..count - 1].to_vec()).is_err()
+            );
+            let mut bad = inputs.clone();
+            bad[count - 1].1 = b"invalid".to_vec();
+            assert!(commit_calendar_sequence(&mut state, tab, bad).is_err());
+            assert_eq!(state.replacements, before);
+            assert_eq!(state.calendar.current_item(), &old);
+            commit_calendar_sequence(&mut state, tab, inputs).unwrap();
+            assert_eq!(state.mappings, mappings);
+            for path in &paths {
+                assert_eq!(state.replacements[path], before[path]);
+            }
+            let pack = parse_ui_pack(&build_project_pack(&state).unwrap()).unwrap();
+            assert!(pack.calendar.is_some());
+            let new_paths = match state.calendar.current_item() {
+                CalendarItemDraft::Image { context, .. } => context,
+                _ => unreachable!(),
+            };
+            for path in new_paths {
+                assert_eq!(pack.replacements[path], state.replacements[path]);
+            }
+            let mut restored = UiState::default();
+            restored.replacements = pack.replacements.clone();
+            restored.mappings = pack.mappings.clone();
+            restored.imported_paths = restored.replacements.keys().cloned().collect();
+            import_feature_assets(
+                &mut restored,
+                pack.backgrounds.clone(),
+                pack.calendar.clone(),
+                &pack.replacements,
+            );
+            let again = parse_ui_pack(&build_project_pack(&restored).unwrap()).unwrap();
+            assert_eq!(again.calendar, pack.calendar);
+            assert_eq!(again.replacements, pack.replacements);
+            assert_eq!(again.mappings, pack.mappings);
+        }
+    }
+
+    #[test]
+    fn band11_calendar_background_uses_launcher_convention() {
+        let mut state = UiState::default();
+        state.target = "xiaomi-band-11-4.100.155".into();
+        commit_calendar_background(&mut state, calendar_bin()).unwrap();
+        assert_eq!(
+            state.mappings[0].source,
+            format!("/resource/{CALENDAR_LAUNCHER}")
+        );
+        clear_calendar_background(&mut state).unwrap();
+        assert!(state.replacements.is_empty());
+        assert!(state.mappings.is_empty());
+    }
+
+    #[test]
+    fn calendar_background_uses_resource_relative_path_and_clear_preserves_aliases() {
+        let mut state = UiState::default();
+        commit_calendar_background(&mut state, calendar_bin()).unwrap();
+        assert_eq!(
+            state.mappings[0].source,
+            format!("/resource/{CALENDAR_BACKGROUND}")
+        );
+        assert_eq!(state.mappings[0].destination, CALENDAR_BACKGROUND);
+        state.mappings.push(Mapping {
+            source: "/data/shared.bin".into(),
+            destination: CALENDAR_BACKGROUND.into(),
+        });
+        clear_calendar_background(&mut state).unwrap();
+        assert_eq!(state.mappings.len(), 1);
+        assert!(state.replacements.contains_key(CALENDAR_BACKGROUND));
+        state.mappings.clear();
+        state.imported_paths.insert(CALENDAR_BACKGROUND.into());
+        clear_calendar_background(&mut state).unwrap();
+        assert!(state.replacements.contains_key(CALENDAR_BACKGROUND));
+    }
+
+    #[test]
+    fn calendar_background_validation_is_atomic_and_resolves_imported_destination() {
+        let mut state = UiState::default();
+        state.mappings.push(Mapping {
+            source: format!("/resource/{CALENDAR_BACKGROUND}"),
+            destination: "shared/calendar.bin".into(),
+        });
+        state.mappings.push(Mapping {
+            source: "/data/alias.bin".into(),
+            destination: "shared/calendar.bin".into(),
+        });
+        state.imported_paths.insert("shared/calendar.bin".into());
+        state
+            .replacements
+            .insert("shared/calendar.bin".into(), calendar_bin());
+        let old = state.replacements.clone();
+        assert!(commit_calendar_background(&mut state, app_icons::canopus_template()).is_err());
+        assert_eq!(state.replacements, old);
+        assert_eq!(state.mappings.len(), 2);
+        let mut valid = calendar_bin();
+        valid[12] = 42;
+        commit_calendar_background(&mut state, valid.clone()).unwrap();
+        assert_eq!(state.replacements["shared/calendar.bin"], valid);
+        clear_calendar_background(&mut state).unwrap();
+        assert_eq!(state.replacements["shared/calendar.bin"], valid);
+        assert_eq!(state.mappings.len(), 1);
+    }
+
+    #[test]
+    fn calendar_background_budget_and_directory_clear_fail_without_mutation() {
+        let mut state = UiState::default();
+        state
+            .replacements
+            .insert("large.bin".into(), vec![0; MAX_ICON_BYTES]);
+        assert!(commit_calendar_background(&mut state, calendar_bin()).is_err());
+        assert!(state.mappings.is_empty());
+        assert_eq!(state.replacements.len(), 1);
+        state.mappings.push(Mapping {
+            source: "/resource/app/".into(),
+            destination: "imported/".into(),
+        });
+        assert!(clear_calendar_background(&mut state).is_err());
+        assert_eq!(state.mappings.len(), 1);
+    }
+
+    #[test]
+    fn calendar_background_rule_budget_fails_before_asset_mutation() {
+        let mut state = UiState::default();
+        for index in 0..256 {
+            state.mappings.push(Mapping {
+                source: format!("/data/{index}.bin"),
+                destination: "shared.bin".into(),
+            });
+        }
+        assert!(commit_calendar_background(&mut state, calendar_bin()).is_err());
+        assert_eq!(state.mappings.len(), 256);
+        assert!(state.replacements.is_empty());
+    }
+
+    #[test]
+    fn calendar_size_and_position_cover_device_bounds() {
+        for size in [0, 8, 72] {
+            assert!(valid_calendar_size(size));
+        }
+        for size in [1, 7, 73, u32::MAX] {
+            assert!(!valid_calendar_size(size));
+        }
+        assert_eq!(
+            calendar_preview_anchor(-112, 112, crpack::CalendarAlign::Center),
+            (
+                56,
+                56,
+                "translate(-50%, -50%) translate(-112px, 112px)".into()
+            )
+        );
+        assert_eq!(
+            calendar_preview_anchor(0, 0, crpack::CalendarAlign::TopRight).0,
+            112
+        );
+        assert_eq!(
+            calendar_preview_anchor(0, 0, crpack::CalendarAlign::TopLeft).0,
+            0
+        );
+    }
+
+    #[test]
+    fn feature_only_workbench_exports_without_firmware_or_replacements() {
+        let mut state = UiState::default();
+        state.backgrounds.launcher = BgModeDraft::Blur;
+        let pack = parse_ui_pack(&build_project_pack(&state).unwrap()).unwrap();
+        assert!(pack.backgrounds.is_some());
+        assert!(pack.replacements.is_empty());
+        state.backgrounds = BackgroundsDraft::default();
+        state.calendar.enabled = true;
+        let pack = parse_ui_pack(&build_project_pack(&state).unwrap()).unwrap();
+        assert!(pack.calendar.is_some());
+        assert!(pack.replacements.is_empty());
     }
 
     fn transparent_bin() -> Vec<u8> {
@@ -4936,6 +7544,8 @@ mod tests {
                 description: None,
                 target: None,
                 replacements: &replacements,
+                backgrounds: None,
+                calendar: None,
             },
             std::slice::from_ref(&mapping),
             &[],
@@ -5074,6 +7684,8 @@ mod tests {
                 description: None,
                 target: None,
                 replacements: &replacements,
+                backgrounds: None,
+                calendar: None,
             },
             &[Mapping {
                 source: format!("@quickapp-icon/{}", declaration.package),
@@ -5438,6 +8050,8 @@ mod tests {
             description: None,
             target: None,
             replacements: &replacements,
+            backgrounds: None,
+            calendar: None,
         })
         .unwrap();
 
@@ -5452,5 +8066,67 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(state.version, "2.0.0");
         assert_eq!(state.version_code, "123");
+    }
+
+    #[test]
+    fn editor_backgrounds_and_calendar_export_and_import() {
+        let mut state = UiState::default();
+        state
+            .replacements
+            .insert("app/icon.bin".into(), vec![1, 2, 3]);
+        state.backgrounds.launcher = BgModeDraft::Blur;
+        state.backgrounds.control_center = BgModeDraft::Image {
+            image_path: "backgrounds/controlCenter.bin".into(),
+            bytes: Some(Arc::new(vec![10, 20, 30])),
+            preview_uri: None,
+        };
+        state.calendar.enabled = true;
+        state.calendar.day = CalendarItemDraft::Text {
+            x: 5,
+            y: 35,
+            align: crpack::CalendarAlign::Center,
+            size: 28,
+            color: "#00FFCC".into(),
+        };
+
+        let bytes = build_project_pack(&state).unwrap();
+        let unpacked = parse_ui_pack(&bytes).unwrap();
+        assert_eq!(
+            unpacked.backgrounds,
+            Some(crpack::BackgroundsDeclaration {
+                launcher: Some(crpack::BackgroundSetting::Blur),
+                control_center: Some(crpack::BackgroundSetting::Image {
+                    image: "backgrounds/controlCenter.bin".into()
+                }),
+                notifications: None,
+                widgets: None,
+            })
+        );
+        assert!(unpacked.calendar.is_some());
+
+        // Import test
+        let mut restored = UiState::default();
+        import_feature_assets(
+            &mut restored,
+            unpacked.backgrounds,
+            unpacked.calendar,
+            &unpacked.replacements,
+        );
+        assert_eq!(restored.backgrounds.launcher, BgModeDraft::Blur);
+        assert!(matches!(
+            restored.backgrounds.control_center,
+            BgModeDraft::Image { ref image_path, .. } if image_path == "backgrounds/controlCenter.bin"
+        ));
+        assert!(restored.calendar.enabled);
+        assert_eq!(
+            restored.calendar.day,
+            CalendarItemDraft::Text {
+                x: 5,
+                y: 35,
+                align: crpack::CalendarAlign::Center,
+                size: 28,
+                color: "#00FFCC".into(),
+            }
+        );
     }
 }

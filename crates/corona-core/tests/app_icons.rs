@@ -17,6 +17,8 @@ fn options(files: &BTreeMap<String, Vec<u8>>) -> PackOptions<'_> {
         description: None,
         target: None,
         replacements: files,
+        backgrounds: None,
+        calendar: None,
     }
 }
 

@@ -540,6 +540,11 @@ fn protocol_preflight(theme: &project::ThemeProject, target: &project::Target) -
         })
         .collect();
     icons.extend_from_slice(&target.runtime_quickapp_icons);
+    let backgrounds = target
+        .backgrounds
+        .as_ref()
+        .or(theme.theme.backgrounds.as_ref());
+    let calendar = target.calendar.as_ref().or(theme.theme.calendar.as_ref());
     crpack::build_crpack_with_mappings(
         &crpack::PackOptions {
             theme_id: &theme.theme.theme_id,
@@ -550,6 +555,8 @@ fn protocol_preflight(theme: &project::ThemeProject, target: &project::Target) -
             description: theme.theme.description.as_deref(),
             target: target.device.as_deref(),
             replacements: &files,
+            backgrounds,
+            calendar,
         },
         &mappings,
         &icons,

@@ -49,6 +49,10 @@ pub struct Theme {
     pub canopus_icon: Option<AppIconAsset>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub quickapp_icons: BTreeMap<String, AppIconAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backgrounds: Option<crpack::BackgroundsDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<crpack::CalendarDeclaration>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -116,6 +120,10 @@ pub struct Target {
     pub canopus_icon: Option<AppIconAsset>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub quickapp_icons: BTreeMap<String, AppIconAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backgrounds: Option<crpack::BackgroundsDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<crpack::CalendarDeclaration>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -847,14 +855,24 @@ fn prepare_loaded_target(
     report
         .resources
         .sort_by(|a, b| (&a.role, &a.resource).cmp(&(&b.role, &b.resource)));
+    let backgrounds = target
+        .backgrounds
+        .as_ref()
+        .or(project.theme.backgrounds.as_ref());
+    let calendar = target.calendar.as_ref().or(project.theme.calendar.as_ref());
+    let has_backgrounds = backgrounds.map_or(false, |b| !b.is_empty());
+    let has_calendar = calendar.map_or(false, |c| !c.is_empty());
+
     if project.theme.icons.is_empty()
         && project.theme.canopus_icon.is_none()
         && project.theme.quickapp_icons.is_empty()
         && target.runtime_files.is_empty()
+        && !has_backgrounds
+        && !has_calendar
     {
         report.errors.push(Diagnostic::new(
             "empty_theme",
-            "declare firmware source assets, application icons or runtime files before building",
+            "declare firmware source assets, application icons, runtime files, backgrounds, or calendar before building",
         ));
     }
     let pack = if report.errors.is_empty() {
@@ -867,6 +885,8 @@ fn prepare_loaded_target(
             description: project.theme.description.as_deref(),
             target: target.device.as_deref(),
             replacements: &replacements,
+            backgrounds,
+            calendar,
         };
         match crpack::build_crpack_with_mappings(&options, &mappings, &quickapp_icons) {
             Ok(bytes) => {

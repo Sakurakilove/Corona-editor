@@ -470,6 +470,14 @@ pub(super) fn run(args: Import) -> Result<Value> {
     if let Some(device) = args.device {
         target["device"] = json!(device);
     }
+    if let Some(bg) = &pack.backgrounds {
+        target["backgrounds"] =
+            serde_json::to_value(bg).map_err(|e| Failure::new("json", e.to_string()))?;
+    }
+    if let Some(cal) = &pack.calendar {
+        target["calendar"] =
+            serde_json::to_value(cal).map_err(|e| Failure::new("json", e.to_string()))?;
+    }
     write_file(stage_root, "theme.json", &json_bytes(&theme)?)?;
     write_file(
         stage_root,
@@ -583,6 +591,14 @@ fn preserve_import(
     if let Some(device) = args.device.as_deref().or(pack.target.as_deref()) {
         super::validate_device(Some(device))?;
         target["device"] = json!(device);
+    }
+    if let Some(bg) = &pack.backgrounds {
+        target["backgrounds"] =
+            serde_json::to_value(bg).map_err(|e| Failure::new("json", e.to_string()))?;
+    }
+    if let Some(cal) = &pack.calendar {
+        target["calendar"] =
+            serde_json::to_value(cal).map_err(|e| Failure::new("json", e.to_string()))?;
     }
     let diagnostics = vec![json!({
         "code":"mappings_preserved",

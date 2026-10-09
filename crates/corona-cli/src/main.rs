@@ -848,7 +848,8 @@ fn inspect(path: &Path) -> Result<Value> {
             "versionCode": pack.version_code,
             "author": pack.author, "description": pack.description, "target": pack.target },
         "resourceCount": pack.replacements.len(), "packBytes": bytes.len(),
-        "manifest": manifest, "targets": pack.targets, "mappings": mappings, "files": files
+        "manifest": manifest, "targets": pack.targets, "mappings": mappings, "files": files,
+        "backgrounds": pack.backgrounds, "calendar": pack.calendar
     }))
 }
 

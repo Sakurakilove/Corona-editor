@@ -80,11 +80,7 @@ impl std::str::FromStr for ResizeFilter {
 type Rgba = [u8; 4];
 
 fn pixel_color(pixel: &[u8; 4]) -> Rgba {
-    if pixel[3] == 0 {
-        [0, 0, 0, 0]
-    } else {
-        *pixel
-    }
+    if pixel[3] == 0 { [0, 0, 0, 0] } else { *pixel }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1954,7 +1950,10 @@ mod tests {
         // All first 50 pixels must be decoded as completely transparent
         for x in 0..50 {
             let px = decoded.get_pixel(x, 0);
-            assert_eq!(px[3], 0, "pixel at ({x}, 0) should remain fully transparent");
+            assert_eq!(
+                px[3], 0,
+                "pixel at ({x}, 0) should remain fully transparent"
+            );
         }
     }
 
@@ -1984,7 +1983,10 @@ mod tests {
         for x in 0..259 {
             let p1 = decoded.get_pixel(x, 0)[0] as i32;
             let p2 = decoded.get_pixel(x + 1, 0)[0] as i32;
-            assert!((p1 - p2).abs() <= 10, "step between adjacent pixels too large: {p1} vs {p2}");
+            assert!(
+                (p1 - p2).abs() <= 10,
+                "step between adjacent pixels too large: {p1} vs {p2}"
+            );
         }
     }
 }
