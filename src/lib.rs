@@ -29,7 +29,7 @@ impl event::Guest for MyPlugin {
     }
 
     async fn on_ui_render(element_id: String) {
-        ui::render_main_ui(&element_id);
+        ui::render_main_ui(&element_id).await;
     }
 
     async fn on_card_render(_card_id: String) {}

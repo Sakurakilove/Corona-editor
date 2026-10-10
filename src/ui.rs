@@ -74,6 +74,37 @@ struct CustomDraft {
     feedback: Option<String>,
 }
 
+/// A cheap, complete picture of the editable project.
+///
+/// `replacements` holds `Arc<Vec<u8>>` so snapshots share byte buffers with the
+/// live state instead of copying them; `firmware` is a read-only index that
+/// edits never touch, so it is intentionally not captured.
+#[derive(Clone, Default)]
+struct ProjectSnapshot {
+    firmware_name: String,
+    replacements: BTreeMap<String, Arc<Vec<u8>>>,
+    mappings: Vec<Mapping>,
+    imported_paths: BTreeSet<String>,
+    authored_paths: BTreeSet<String>,
+    custom_templates: BTreeMap<String, Arc<Vec<u8>>>,
+    canopus_destination: String,
+    canopus: Option<IconAsset>,
+    quickapps: Vec<QuickappEntry>,
+    backgrounds: BackgroundsDraft,
+    calendar: CalendarDraft,
+    theme_id: String,
+    pack_name: String,
+    version: String,
+    version_code: String,
+    author: String,
+    description: String,
+    target: String,
+    allow_quantize: bool,
+    resize_filter: lvgl::ResizeFilter,
+}
+
+const UNDO_LIMIT: usize = 20;
+
 struct RuleUndo {
     mappings: Vec<Mapping>,
     assets: BTreeMap<String, Option<Vec<u8>>>,
@@ -109,10 +140,10 @@ impl Default for WorkbenchTab {
 impl WorkbenchTab {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Resources => "📁 图标与资源",
-            Self::Backgrounds => "🎨 系统背景",
-            Self::Calendar => "📅 动态日历工坊",
-            Self::Metadata => "⚙️ 主题属性与清单",
+            Self::Resources => "图标与资源",
+            Self::Backgrounds => "系统背景",
+            Self::Calendar => "动态日历工坊",
+            Self::Metadata => "主题属性与清单",
         }
     }
 
@@ -329,6 +360,10 @@ struct UiState {
     custom_templates: BTreeMap<String, Arc<Vec<u8>>>,
     custom_draft: CustomDraft,
     rule_undo: Option<RuleUndo>,
+    /// Full-project undo history. `firmware` is a read-only index and is never
+    /// mutated by edits, so it is deliberately excluded from every snapshot.
+    undo_stack: Vec<ProjectSnapshot>,
+    redo_stack: Vec<ProjectSnapshot>,
     canopus_destination: String,
     canopus: Option<IconAsset>,
     quickapps: Vec<QuickappEntry>,
@@ -347,12 +382,74 @@ struct UiState {
     target: String,
     allow_quantize: bool,
     resize_filter: lvgl::ResizeFilter,
-    busy: bool,
+    busy: Option<BusyKind>,
     status: String,
     error: Option<String>,
+    /// Inline validation messages keyed by the field's change event id.
+    field_errors: BTreeMap<String, String>,
 }
 
 static UI_STATE: OnceLock<Mutex<UiState>> = OnceLock::new();
+
+/// Cached host environment: viewport size and light/dark appearance.
+///
+/// Both are host calls that only change on resize or theme switch, so they are
+/// read once per render rather than on every element build.
+#[derive(Clone, Copy, Default)]
+struct HostEnv {
+    width: u32,
+    height: u32,
+    dark: bool,
+}
+
+static HOST_ENV: OnceLock<Mutex<HostEnv>> = OnceLock::new();
+
+fn host_env() -> &'static Mutex<HostEnv> {
+    HOST_ENV.get_or_init(|| Mutex::new(HostEnv::default()))
+}
+
+fn current_env() -> HostEnv {
+    *host_env()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Refresh the cached viewport and appearance from the host.
+pub async fn refresh_host_env() {
+    let size = psys_host::ui::get_render_size().await;
+    let appearance = psys_host::os::appearance().await;
+    let mut env = host_env()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    env.width = size.width;
+    env.height = size.height;
+    // Treat anything that is not explicitly light as dark, matching the default
+    // palette the rest of the UI assumes.
+    env.dark = !appearance.eq_ignore_ascii_case("light");
+}
+
+/// Height for an image preview frame, clamped so it never exceeds the viewport.
+fn preview_height(preferred: u32) -> u32 {
+    let env = current_env();
+    if env.height == 0 {
+        return preferred;
+    }
+    preferred.min(env.height * 2 / 5).max(120)
+}
+
+/// Vertical space available for scrolling lists inside the plugin viewport.
+///
+/// Falls back to a conservative fixed height when the host cannot report a size,
+/// rather than collapsing the list to zero.
+fn list_height(fraction: f32) -> u32 {
+    let env = current_env();
+    if env.height == 0 {
+        return (440.0 * fraction) as u32;
+    }
+    // Reserve roughly a third of the viewport for header, tabs and status.
+    let usable = env.height.saturating_mul(2) / 3;
+    ((usable as f32) * fraction).max(160.0) as u32
+}
 
 impl Default for UiState {
     fn default() -> Self {
@@ -373,6 +470,8 @@ impl Default for UiState {
             custom_templates: BTreeMap::new(),
             custom_draft: CustomDraft::default(),
             rule_undo: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             canopus_destination: app_icons::CANOPUS_DESTINATION.into(),
             canopus: None,
             quickapps: Vec::new(),
@@ -391,10 +490,38 @@ impl Default for UiState {
             target: String::new(),
             allow_quantize: false,
             resize_filter: lvgl::ResizeFilter::default(),
-            busy: false,
+            busy: None,
             status: "自定义规则和第三方图标无需固件；也可选择固件浏览资源。".into(),
             error: None,
+            field_errors: BTreeMap::new(),
         }
+    }
+}
+
+/// How much of the UI an in-flight operation locks out.
+///
+/// `Blocking` is reserved for operations that mutate the whole project (firmware
+/// load, pack import) where a concurrent edit would be ambiguous. Everything else
+/// uses `Background` so read-only navigation stays available while work runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BusyKind {
+    /// Long, project-wide operation. Locks mutating actions and navigation.
+    Blocking,
+    /// Bounded operation (pick a file, write an export). Only mutating actions lock.
+    Background,
+}
+
+impl UiState {
+    fn busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
+    fn begin_busy(&mut self, kind: BusyKind) {
+        self.busy = Some(kind);
+    }
+
+    fn clear_busy(&mut self) {
+        self.busy = None;
     }
 }
 
@@ -409,6 +536,8 @@ struct UiSnapshot {
     unmapped_assets: Vec<(String, usize)>,
     custom_draft: CustomDraft,
     can_undo_rule: bool,
+    can_undo: bool,
+    can_redo: bool,
     file_count: usize,
     image_count: usize,
     current_dir: String,
@@ -447,6 +576,8 @@ struct UiSnapshot {
     allow_quantize: bool,
     resize_filter: lvgl::ResizeFilter,
     busy: bool,
+    busy_blocks_navigation: bool,
+    field_errors: BTreeMap<String, String>,
     status: String,
     error: Option<String>,
 }
@@ -682,6 +813,8 @@ fn snapshot(state: &mut UiState) -> UiSnapshot {
             .collect(),
         custom_draft: state.custom_draft.clone(),
         can_undo_rule: state.rule_undo.is_some(),
+        can_undo: !state.undo_stack.is_empty(),
+        can_redo: !state.redo_stack.is_empty(),
         file_count,
         image_count,
         current_dir: state.current_dir.clone(),
@@ -778,9 +911,13 @@ fn snapshot(state: &mut UiState) -> UiSnapshot {
         target: state.target.clone(),
         allow_quantize: state.allow_quantize,
         resize_filter: state.resize_filter,
-        busy: state.busy,
+        busy: state.busy(),
+        busy_blocks_navigation: state
+            .busy
+            .is_some_and(|kind| kind == BusyKind::Blocking),
         status: state.status.clone(),
         error: state.error.clone(),
+        field_errors: state.field_errors.clone(),
     }
 }
 
@@ -794,12 +931,17 @@ pub async fn ui_event_processor(event: ui::Event, event_id: &str, event_payload:
         {
             apply_search();
         }
+        ui::Event::Blur => {
+            if let Some(field_id) = event_id.strip_prefix("validate:") {
+                validate_on_blur(field_id);
+            }
+        }
         _ => {}
     }
 }
 
 async fn process_click(event_id: &str) {
-    if lock_state().busy {
+    if lock_state().busy() {
         return;
     }
     match event_id {
@@ -812,9 +954,13 @@ async fn process_click(event_id: &str) {
                 Ok(()) => {
                     state.status = "规则已保存；运行时路径未验证。可撤销本次修改。".into();
                     state.error = None;
+                    state.field_errors.clear();
                 }
                 Err(error) => {
                     state.status = "规则未保存，现有文件保持不变。".into();
+                    // Mirror the failure onto the field that caused it so the
+                    // message sits next to the input, not only in the status line.
+                    state.field_errors.insert("custom.source".into(), error.clone());
                     state.error = Some(error);
                 }
             }
@@ -848,6 +994,24 @@ async fn process_click(event_id: &str) {
         }
         "custom.undo" => {
             undo_custom_rule(&mut lock_state());
+            render_current();
+        }
+        "project.undo" => {
+            let mut state = lock_state();
+            if undo_project(&mut state) {
+                state.status = "已撤销上一步操作。".into();
+                state.error = None;
+            }
+            drop(state);
+            render_current();
+        }
+        "project.redo" => {
+            let mut state = lock_state();
+            if redo_project(&mut state) {
+                state.status = "已重做。".into();
+                state.error = None;
+            }
+            drop(state);
             render_current();
         }
         _ if event_id.starts_with("custom.member:") => {
@@ -1310,7 +1474,7 @@ async fn process_click(event_id: &str) {
             {
                 let mut state = lock_state();
                 state.filter_mode = ResourceFilter::Replaced;
-                state.status = "显示已替换的资源清单。".into();
+                state.status = "显示全部已修改资源。".into();
                 state.error = None;
             }
             render_current();
@@ -1340,7 +1504,7 @@ async fn process_click(event_id: &str) {
         "icons.canopus.bin" => begin_icon_pick(None, IconPick::Binary).await,
         "icons.canopus.undo" => {
             let mut state = lock_state();
-            state.rule_undo = None;
+            push_undo(&mut state);
             state.canopus = None;
             state
                 .mappings
@@ -1358,7 +1522,7 @@ async fn process_click(event_id: &str) {
                     "png" => begin_icon_pick(Some(package), IconPick::Png).await,
                     "bin" => begin_icon_pick(Some(package), IconPick::Binary).await,
                     "template" => begin_icon_pick(Some(package), IconPick::Template).await,
-                    "remove" => remove_quickapp(package),
+                    "remove" => remove_quickapp(package).await,
                     _ => {}
                 }
             }
@@ -1419,11 +1583,40 @@ async fn process_click(event_id: &str) {
     }
 }
 
+/// Re-validate a field once the user leaves it.
+///
+/// Feedback lands while the field is still visible, so a mistake is corrected in
+/// place rather than surfacing as a failed submit.
+fn validate_on_blur(field_id: &str) {
+    let mut state = lock_state();
+    let value = match field_id {
+        "custom.source" => state.custom_draft.source.clone(),
+        "custom.destination" => state.custom_draft.destination.clone(),
+        "icons.quickapp.package" => state.quickapp_package.clone(),
+        "pack.id" => state.theme_id.clone(),
+        "pack.version_code" => state.version_code.clone(),
+        _ => return,
+    };
+    match validate_field(field_id, &value) {
+        Ok(()) => {
+            state.field_errors.remove(field_id);
+        }
+        Err(error) => {
+            state.field_errors.insert(field_id.to_string(), error);
+        }
+    }
+    drop(state);
+    render_current();
+}
+
 fn process_change(event_id: &str, payload: &str) {
-    if lock_state().busy {
+    if lock_state().busy() {
         return;
     }
     let value = payload_field(payload, "value").unwrap_or_default();
+    // Editing a field that already shows an error clears it; the message returns
+    // on blur if the new value is still invalid.
+    lock_state().field_errors.remove(event_id);
     let checked = payload_field(payload, "checked").as_deref() == Some("true");
     let should_render = {
         let mut state = lock_state();
@@ -1574,7 +1767,7 @@ fn change_custom_target(state: &mut UiState, value: String, member: bool) -> boo
 fn apply_search() {
     {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         state.status = if state.search_query.trim().is_empty() {
@@ -1587,12 +1780,50 @@ fn apply_search() {
 }
 
 async fn begin_firmware_pick() {
-    {
-        let mut state = lock_state();
-        if state.busy {
+    // Switching firmware rebuilds the read-only browser: directory, search and
+    // selection all reset. Warn only when there is something to lose.
+    let has_firmware = {
+        let state = lock_state();
+        if state.busy() {
             return;
         }
-        state.busy = true;
+        !state.firmware_name.is_empty()
+    };
+    if has_firmware {
+        // Drop the guard before awaiting: the dialog can take arbitrarily long.
+        let confirmed = psys_host::dialog::show_dialog(
+            psys_host::dialog::DialogType::Alert,
+            psys_host::dialog::DialogStyle::System,
+            psys_host::dialog::DialogInfo {
+                title: "更换固件？".into(),
+                content: "当前目录、搜索与选中项将被重置；已保存的规则、替换和图标会完整保留。".into(),
+                buttons: vec![
+                    psys_host::dialog::DialogButton {
+                        id: "cancel".into(),
+                        primary: false,
+                        content: "取消".into(),
+                    },
+                    psys_host::dialog::DialogButton {
+                        id: "replace".into(),
+                        primary: true,
+                        content: "更换固件".into(),
+                    },
+                ],
+            },
+        )
+        .await;
+        if confirmed.clicked_btn_id != "replace" {
+            lock_state().status = "已取消；固件未更改。".into();
+            render_current();
+            return;
+        }
+    }
+    {
+        let mut state = lock_state();
+        if state.busy() {
+            return;
+        }
+        state.begin_busy(BusyKind::Blocking);
         state.error = None;
         state.status = "等待选择固件文件…".into();
     }
@@ -1616,7 +1847,7 @@ async fn begin_firmware_pick() {
         Err(error) => {
             {
                 let mut state = lock_state();
-                state.busy = false;
+                state.clear_busy();
                 state.status = "无法打开固件选择器。".into();
                 state.error = Some(format!("选择固件失败：{error}"));
             }
@@ -1628,7 +1859,7 @@ async fn begin_firmware_pick() {
     if picked.data.is_empty() {
         {
             let mut state = lock_state();
-            state.busy = false;
+            state.clear_busy();
             state.status = "没有读取到固件文件；可以重新选择。".into();
         }
         render_current();
@@ -1654,7 +1885,7 @@ async fn begin_firmware_pick() {
                 if state.target.is_empty() && !target.is_empty() {
                     state.target = target;
                 }
-                state.busy = false;
+                state.clear_busy();
                 let icon_count = icon_replacement_count(&state);
                 state.status = format!(
                     "固件已解包，发现 {count} 个资源文件。全部规则和替换已保留（第三方图标 {icon_count}）；旧固件编辑作为待验证规则保留。"
@@ -1664,7 +1895,7 @@ async fn begin_firmware_pick() {
         }
         Err(error) => {
             let mut state = lock_state();
-            state.busy = false;
+            state.clear_busy();
             state.status = "固件未能加载。".into();
             state.error = Some(format!("固件解包失败：{error}"));
         }
@@ -1675,10 +1906,10 @@ async fn begin_firmware_pick() {
 async fn begin_crpack_pick() {
     {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
-        state.busy = true;
+        state.begin_busy(BusyKind::Blocking);
         state.error = None;
         state.status = "等待选择 CRPack 文件…".into();
     }
@@ -1702,7 +1933,7 @@ async fn begin_crpack_pick() {
         Err(error) => {
             {
                 let mut state = lock_state();
-                state.busy = false;
+                state.clear_busy();
                 state.status = "无法打开 CRPack 选择器。".into();
                 state.error = Some(format!("选择 CRPack 失败：{error}"));
             }
@@ -1714,7 +1945,7 @@ async fn begin_crpack_pick() {
     if picked.data.is_empty() {
         {
             let mut state = lock_state();
-            state.busy = false;
+            state.clear_busy();
             state.status = "没有读取到 CRPack 文件；可以重新选择。".into();
         }
         render_current();
@@ -1764,7 +1995,7 @@ async fn begin_crpack_pick() {
             state.thumbnail_cache.clear();
             state.filter_mode = ResourceFilter::Replaced;
             state.search_query.clear();
-            state.busy = false;
+            state.clear_busy();
 
             state.preview_uri = state
                 .selected_path
@@ -1776,7 +2007,7 @@ async fn begin_crpack_pick() {
         }
         Err(error) => {
             let mut state = lock_state();
-            state.busy = false;
+            state.clear_busy();
             state.status = "CRPack 未能导入。".into();
             state.error = Some(format!("CRPack 导入失败：{error}；现有编辑保持不变。"));
         }
@@ -2063,10 +2294,10 @@ fn import_assets(
     mappings: Vec<Mapping>,
     declarations: Vec<QuickappIcon>,
 ) {
+    push_undo(state);
     state.imported_paths = replacements.keys().cloned().collect();
     state.authored_paths.clear();
     state.custom_draft = CustomDraft::default();
-    state.rule_undo = None;
     state.custom_templates = replacements
         .iter()
         .filter(|(path, bytes)| {
@@ -2278,6 +2509,100 @@ fn validate_draft_budget(
         .map_or(0, |bytes| bytes.len());
     // Count both immutable originals and staged templates, not just output bytes.
     validate_icon_budget(template, template_bytes(state), previous_template, true)
+}
+
+/// Capture the project before a mutating edit so `undo_project` can restore it.
+///
+/// Called immediately before any change that the user should be able to reverse.
+/// Redo history is dropped here: a new edit invalidates the forward branch.
+fn push_undo(state: &mut UiState) {
+    let snapshot = project_snapshot(state);
+    state.undo_stack.push(snapshot);
+    if state.undo_stack.len() > UNDO_LIMIT {
+        state.undo_stack.remove(0);
+    }
+    state.redo_stack.clear();
+}
+
+fn project_snapshot(state: &UiState) -> ProjectSnapshot {
+    ProjectSnapshot {
+        firmware_name: state.firmware_name.clone(),
+        replacements: state
+            .replacements
+            .iter()
+            .map(|(path, bytes)| (path.clone(), Arc::new(bytes.clone())))
+            .collect(),
+        mappings: state.mappings.clone(),
+        imported_paths: state.imported_paths.clone(),
+        authored_paths: state.authored_paths.clone(),
+        custom_templates: state.custom_templates.clone(),
+        canopus_destination: state.canopus_destination.clone(),
+        canopus: state.canopus.clone(),
+        quickapps: state.quickapps.clone(),
+        backgrounds: state.backgrounds.clone(),
+        calendar: state.calendar.clone(),
+        theme_id: state.theme_id.clone(),
+        pack_name: state.pack_name.clone(),
+        version: state.version.clone(),
+        version_code: state.version_code.clone(),
+        author: state.author.clone(),
+        description: state.description.clone(),
+        target: state.target.clone(),
+        allow_quantize: state.allow_quantize,
+        resize_filter: state.resize_filter,
+    }
+}
+
+/// Restore the most recent snapshot and push the current state onto redo.
+fn undo_project(state: &mut UiState) -> bool {
+    let Some(snapshot) = state.undo_stack.pop() else {
+        return false;
+    };
+    let current = project_snapshot(state);
+    apply_snapshot(state, snapshot);
+    state.redo_stack.push(current);
+    true
+}
+
+fn redo_project(state: &mut UiState) -> bool {
+    let Some(snapshot) = state.redo_stack.pop() else {
+        return false;
+    };
+    let current = project_snapshot(state);
+    apply_snapshot(state, snapshot);
+    state.undo_stack.push(current);
+    true
+}
+
+fn apply_snapshot(state: &mut UiState, snapshot: ProjectSnapshot) {
+    state.firmware_name = snapshot.firmware_name;
+    // Bytes come back shared: nothing downstream mutates replacement contents.
+    state.replacements = snapshot
+        .replacements
+        .into_iter()
+        .map(|(path, bytes)| (path, bytes.as_ref().clone()))
+        .collect();
+    state.mappings = snapshot.mappings;
+    state.imported_paths = snapshot.imported_paths;
+    state.authored_paths = snapshot.authored_paths;
+    state.custom_templates = snapshot.custom_templates;
+    state.canopus_destination = snapshot.canopus_destination;
+    state.canopus = snapshot.canopus;
+    state.quickapps = snapshot.quickapps;
+    state.backgrounds = snapshot.backgrounds;
+    state.calendar = snapshot.calendar;
+    state.theme_id = snapshot.theme_id;
+    state.pack_name = snapshot.pack_name;
+    state.version = snapshot.version;
+    state.version_code = snapshot.version_code;
+    state.author = snapshot.author;
+    state.description = snapshot.description;
+    state.target = snapshot.target;
+    state.allow_quantize = snapshot.allow_quantize;
+    state.resize_filter = snapshot.resize_filter;
+    state.custom_draft = CustomDraft::default();
+    state.thumbnail_cache.clear();
+    state.preview_uri = None;
 }
 
 fn save_rule_undo(state: &mut UiState, paths: &BTreeSet<String>) {
@@ -2617,7 +2942,7 @@ fn prepare_custom_upload(
 async fn begin_custom_pick(mode: CustomPick) {
     {
         let mut state = lock_state();
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.status = "等待选择文件；只更新草稿，保存后才生效。".into();
     }
@@ -2640,7 +2965,7 @@ async fn begin_custom_pick(mode: CustomPick) {
     )
     .await;
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match picked {
         Ok(picked) if picked.name.is_empty() => {
             state.status = "已取消文件选择；草稿及现有编辑保持不变。".into();
@@ -2699,7 +3024,7 @@ async fn begin_background_pick() {
 async fn begin_background_pick_for(surface: BgSurface) {
     {
         let mut state = lock_state();
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.status = format!("等待选择 {} 壁纸图片（支持 PNG / BIN）…", surface.name());
     }
@@ -2718,7 +3043,7 @@ async fn begin_background_pick_for(surface: BgSurface) {
     )
     .await;
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match picked {
         Ok(picked) if picked.name.is_empty() => {
             state.status = "已取消壁纸选择。".into();
@@ -2877,6 +3202,7 @@ fn commit_calendar_frames(
         staged.push(encoded);
     }
     // All validation precedes mutation; retain old assets, aliases and declarations verbatim.
+    push_undo(state);
     for (path, bytes) in paths.iter().cloned().zip(staged) {
         state.authored_paths.insert(path.clone());
         state.replacements.insert(path, bytes);
@@ -2889,7 +3215,6 @@ fn commit_calendar_frames(
     if let CalendarItemDraft::Image { context, .. } = item {
         *context = next_context;
     }
-    state.rule_undo = None;
     Ok(())
 }
 
@@ -2986,14 +3311,14 @@ fn parse_calendar_sequence_zip(
 async fn begin_calendar_frame_pick(index: usize) {
     let tab = {
         let mut state = lock_state();
-        if state.busy
+        if state.busy()
             || !calendar_sequence_import_visible(state.calendar.current_item())
             || index >= calendar_sequence_count(state.calendar.active_tab)
         {
             return;
         }
         let tab = state.calendar.active_tab;
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.status = format!("选择 {} 的 PNG / BIN…", calendar_slot_label(tab, index));
         tab
@@ -3013,7 +3338,7 @@ async fn begin_calendar_frame_pick(index: usize) {
     )
     .await;
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match picked {
         Ok(picked) if picked.name.is_empty() => state.status = "已取消；原帧保持不变。".into(),
         Ok(picked) => {
@@ -3032,10 +3357,10 @@ async fn begin_calendar_frame_pick(index: usize) {
 async fn begin_calendar_sequence_pick() {
     let tab = {
         let mut state = lock_state();
-        if state.busy || !calendar_sequence_import_visible(state.calendar.current_item()) {
+        if state.busy() || !calendar_sequence_import_visible(state.calendar.current_item()) {
             return;
         }
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.calendar.active_tab
     };
@@ -3059,7 +3384,7 @@ async fn begin_calendar_sequence_pick() {
     )
     .await;
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match picked {
         Ok(picked) if picked.name.is_empty() => {
             state.status = "已取消序列导入；原素材保持不变。".into()
@@ -3079,7 +3404,7 @@ async fn begin_calendar_sequence_pick() {
 async fn begin_calendar_bg_pick() {
     {
         let mut state = lock_state();
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.status = "等待选择 112×112 日历底图（支持 PNG / BIN）…".into();
     }
@@ -3098,7 +3423,7 @@ async fn begin_calendar_bg_pick() {
     )
     .await;
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match picked {
         Ok(picked) if picked.name.is_empty() => {
             state.status = "已取消日历底图选择。".into();
@@ -3253,7 +3578,7 @@ fn clear_calendar_background(state: &mut UiState) -> Result<(), String> {
     {
         return Err("底图由目录规则提供，请在自定义规则中编辑该目录；未删除共享素材。".into());
     }
-    state.rule_undo = None;
+    push_undo(state);
     state.mappings.retain(|rule| rule.source != source);
     remove_unreferenced_authored_assets(state);
     Ok(())
@@ -3424,21 +3749,56 @@ fn add_quickapp() {
         Ok(()) => {
             state.status = "已添加快应用。".into();
             state.error = None;
+            state.field_errors.remove("icons.quickapp.package");
         }
-        Err(error) => state.error = Some(format!("无法添加快应用：{error}")),
+        Err(error) => {
+            state
+                .field_errors
+                .insert("icons.quickapp.package".into(), error.clone());
+            state.error = Some(format!("无法添加快应用：{error}"));
+        }
     }
     drop(state);
     render_current();
 }
 
-fn remove_quickapp(package: &str) {
+async fn remove_quickapp(package: &str) {
+    // Removing an icon also drops its declaration, which cannot be rebuilt from
+    // the pack. Confirm before discarding work the user cannot reproduce.
+    let confirmed = psys_host::dialog::show_dialog(
+        psys_host::dialog::DialogType::Alert,
+        psys_host::dialog::DialogStyle::System,
+        psys_host::dialog::DialogInfo {
+            title: "移除快应用图标？".into(),
+            content: format!("将移除「{package}」的图标与声明。此操作后仍可用「撤销」恢复。"),
+            buttons: vec![
+                psys_host::dialog::DialogButton {
+                    id: "cancel".into(),
+                    primary: false,
+                    content: "取消".into(),
+                },
+                psys_host::dialog::DialogButton {
+                    id: "remove".into(),
+                    primary: true,
+                    content: "移除".into(),
+                },
+            ],
+        },
+    )
+    .await;
+    if confirmed.clicked_btn_id != "remove" {
+        lock_state().status = "已取消；快应用图标未更改。".into();
+        render_current();
+        return;
+    }
+
     let mut state = lock_state();
     if let Some(index) = state
         .quickapps
         .iter()
         .position(|entry| entry.declaration.package == package)
     {
-        state.rule_undo = None;
+        push_undo(&mut state);
         state.quickapps.remove(index);
         // The destination may also back another app or an explicit firmware rule.
         // Canonical QuickApp rules were normalized to declarations during import.
@@ -3555,7 +3915,7 @@ fn resource_replacement<'a>(state: &'a UiState, path: &str) -> Option<&'a [u8]> 
 }
 
 fn set_resource_replacement(state: &mut UiState, path: &str, bytes: Vec<u8>) {
-    state.rule_undo = None;
+    push_undo(state);
     let destination = resource_destination(state, path);
     let source = format!("/resource/{path}");
     if !state.mappings.iter().any(|mapping| {
@@ -3577,7 +3937,7 @@ fn set_resource_replacement(state: &mut UiState, path: &str, bytes: Vec<u8>) {
 async fn begin_icon_pick(package: Option<&str>, mode: IconPick) {
     let (template, allow_quantize, resize_filter) = {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         let template = if let Some(package) = package {
@@ -3596,7 +3956,7 @@ async fn begin_icon_pick(package: Option<&str>, mode: IconPick) {
         } else {
             None
         };
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.status = match mode {
             IconPick::Png => "等待选择图标 PNG…",
@@ -3654,7 +4014,7 @@ async fn begin_icon_pick(package: Option<&str>, mode: IconPick) {
         Err(error) => Err(format!("选择图标失败：{error}")),
     };
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match result {
         Ok(Some(bytes)) => {
             if let Err(error) = validate_icon_update(&state, package, mode, bytes.len()) {
@@ -3662,7 +4022,7 @@ async fn begin_icon_pick(package: Option<&str>, mode: IconPick) {
                 state.error = Some(error);
             } else {
                 let size = bytes.len();
-                state.rule_undo = None;
+                push_undo(&mut state);
                 if matches!(mode, IconPick::Template) {
                     if let Some(entry) = state
                         .quickapps
@@ -3678,7 +4038,7 @@ async fn begin_icon_pick(package: Option<&str>, mode: IconPick) {
                 state.status = if matches!(mode, IconPick::Template) {
                     format!("已加载模板（{}）。", format_bytes(size))
                 } else {
-                    format!("已替换图标（{}）。", format_bytes(size))
+                    format!("已修改图标（{}）。", format_bytes(size))
                 };
                 state.error = None;
             }
@@ -3696,7 +4056,7 @@ async fn begin_icon_pick(package: Option<&str>, mode: IconPick) {
 async fn begin_png_pick() {
     let (path, template, allow_quantize, resize_filter) = {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         let Some(path) = state.selected_path.clone() else {
@@ -3730,7 +4090,7 @@ async fn begin_png_pick() {
             render_current();
             return;
         }
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.status = "等待选择 PNG 图片…".into();
         state.error = None;
         (path, template, state.allow_quantize, state.resize_filter)
@@ -3755,7 +4115,7 @@ async fn begin_png_pick() {
         Err(error) => {
             {
                 let mut state = lock_state();
-                state.busy = false;
+                state.clear_busy();
                 state.status = "PNG 选择未完成。".into();
                 state.error = Some(format!("选择 PNG 失败：{error}；原资源未更改。"));
             }
@@ -3804,7 +4164,7 @@ async fn begin_png_pick() {
                 state.thumbnail_cache.remove(&path);
                 state.selected_path = Some(path.clone());
                 state.preview_uri = preview_uri;
-                state.busy = false;
+                state.clear_busy();
                 state.status = format!(
                     "已将 PNG 转换为 {format_name}（{}{quantize_status}）。",
                     format_bytes(size)
@@ -3813,14 +4173,14 @@ async fn begin_png_pick() {
             }
             Err(error) => {
                 let mut state = lock_state();
-                state.busy = false;
+                state.clear_busy();
                 state.status = "PNG 转换未完成，原资源未更改。".into();
                 state.error = Some(format!("PNG 转换失败：{error}"));
             }
         }
     } else {
         let mut state = lock_state();
-        state.busy = false;
+        state.clear_busy();
         state.status = "没有读取到 PNG 文件；原资源未更改。".into();
     }
     render_current();
@@ -3829,7 +4189,7 @@ async fn begin_png_pick() {
 async fn begin_binary_pick() {
     let path = {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         let Some(path) = state.selected_path.clone() else {
@@ -3838,7 +4198,7 @@ async fn begin_binary_pick() {
             render_current();
             return;
         };
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.status = "等待选择替换文件…".into();
         state.error = None;
         path
@@ -3863,7 +4223,7 @@ async fn begin_binary_pick() {
         Err(error) => {
             {
                 let mut state = lock_state();
-                state.busy = false;
+                state.clear_busy();
                 state.status = "文件替换未完成。".into();
                 state.error = Some(format!("打开文件选择器失败：{error}"));
             }
@@ -3882,7 +4242,7 @@ async fn begin_binary_pick() {
             )
             .saturating_add(picked_size);
         if new_total > 64 * 1024 * 1024 {
-            state.busy = false;
+            state.clear_busy();
             state.status = "替换文件没有应用。".into();
             state.error = Some("替换资源总大小不能超过 CRPack v1 的 64 MiB 上限。".into());
         } else {
@@ -3891,9 +4251,9 @@ async fn begin_binary_pick() {
             state.thumbnail_cache.remove(&path);
             state.selected_path = Some(path);
             state.preview_uri = preview_uri;
-            state.busy = false;
+            state.clear_busy();
             state.status = format!(
-                "已替换为 {}（{}；当前资源总量 {}）。",
+                "已修改为 {}（{}；当前资源总量 {}）。",
                 picked.name,
                 format_bytes(picked_size),
                 format_bytes(new_total)
@@ -3902,7 +4262,7 @@ async fn begin_binary_pick() {
         }
     } else {
         let mut state = lock_state();
-        state.busy = false;
+        state.clear_busy();
         state.status = "没有读取到替换文件；原资源未更改。".into();
     }
     render_current();
@@ -3962,7 +4322,7 @@ fn restore_selected() {
 fn select_file(path: &str) {
     let (bytes, read_error) = {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         let Some((file_size, template_is_image)) = state
@@ -4013,7 +4373,7 @@ fn select_file(path: &str) {
 async fn begin_export() {
     {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         if replacement_count(&state) == 0
@@ -4032,7 +4392,7 @@ async fn begin_export() {
             render_current();
             return;
         }
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.status = "正在生成并校验 CRPack…".into();
         state.error = None;
     }
@@ -4048,7 +4408,7 @@ async fn begin_export() {
         Err(error) => {
             {
                 let mut state = lock_state();
-                state.busy = false;
+                state.clear_busy();
                 state.status = "CRPack 未导出；请修正信息后重试。".into();
                 state.error = Some(format!("导出校验失败：{error}"));
             }
@@ -4074,7 +4434,7 @@ async fn begin_export() {
         Ok(session) => session,
         Err(error) => {
             let mut state = lock_state();
-            state.busy = false;
+            state.clear_busy();
             state.status = "无法打开保存对话框。".into();
             state.error = Some(format!("保存文件失败：{error}"));
             drop(state);
@@ -4097,7 +4457,7 @@ async fn begin_export() {
     if write_error {
         psys_host::dialog::save_file_abort(session.session_id).await;
         let mut state = lock_state();
-        state.busy = false;
+        state.clear_busy();
         state.status = "CRPack 写入失败。".into();
         state.error = Some("未能完整写入导出文件；请检查目标位置并重试。".into());
         drop(state);
@@ -4111,7 +4471,7 @@ async fn begin_export() {
     {
         psys_host::dialog::save_file_abort(session.session_id).await;
         let mut state = lock_state();
-        state.busy = false;
+        state.clear_busy();
         state.status = "CRPack 写入失败。".into();
         state.error = Some("未能完成导出文件。".into());
         drop(state);
@@ -4121,7 +4481,7 @@ async fn begin_export() {
 
     {
         let mut state = lock_state();
-        state.busy = false;
+        state.clear_busy();
         state.status = format!("已导出「{pack_name}」· {}。", format_bytes(package.len()));
         state.error = None;
     }
@@ -4131,7 +4491,7 @@ async fn begin_export() {
 async fn begin_resource_extract(as_png: bool) {
     let path = {
         let mut state = lock_state();
-        if state.busy {
+        if state.busy() {
             return;
         }
         let Some(path) = state.selected_path.clone() else {
@@ -4140,7 +4500,7 @@ async fn begin_resource_extract(as_png: bool) {
             render_current();
             return;
         };
-        state.busy = true;
+        state.begin_busy(BusyKind::Background);
         state.error = None;
         state.status = if as_png {
             "正在将当前资源转换为 PNG…".into()
@@ -4159,7 +4519,7 @@ async fn begin_resource_extract(as_png: bool) {
         Ok(bytes) => bytes,
         Err(error) => {
             let mut state = lock_state();
-            state.busy = false;
+            state.clear_busy();
             state.status = "资源提取未完成。".into();
             state.error = Some(format!("无法读取资源：{error}"));
             drop(state);
@@ -4169,7 +4529,7 @@ async fn begin_resource_extract(as_png: bool) {
     };
     if as_png && lvgl::inspect_image(bytes.as_slice()).is_none() {
         let mut state = lock_state();
-        state.busy = false;
+        state.clear_busy();
         state.status = "资源提取未完成。".into();
         state.error = Some("此资源不是受支持的图片，无法转换为 PNG。".into());
         drop(state);
@@ -4202,7 +4562,7 @@ async fn begin_resource_extract(as_png: bool) {
     };
 
     let mut state = lock_state();
-    state.busy = false;
+    state.clear_busy();
     match result {
         Ok(size) => {
             state.status = format!("已提取当前资源「{}」· {}。", file_name, format_bytes(size));
@@ -4374,7 +4734,8 @@ fn render_current() {
     psys_host::ui::render(&root_id, tree);
 }
 
-pub fn render_main_ui(element_id: &str) {
+pub async fn render_main_ui(element_id: &str) {
+    refresh_host_env().await;
     let tree = {
         let mut state = lock_state();
         state.root_element_id = Some(element_id.to_string());
@@ -4400,80 +4761,136 @@ fn build_main_ui(state: UiSnapshot) -> ui::Element {
         ]
         .iter()
         .any(|surface| !matches!(state.backgrounds.get(*surface), BgModeDraft::System));
-    root = root.child(
-        ui::Element::new(ui::ElementType::Grid, None)
-            .grid_template_columns("repeat(auto-fit, minmax(min(100%, 120px), 1fr))")
-            .gap(8)
-            .child(text("资源包工作台", 18))
-            .child(
-                button(
+    // Header: identity on the left, actions on the right. The title is a real
+    // heading, not one equal-width cell of a grid shared with the buttons.
+    let heading = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Column)
+        .flex_grow(1.0)
+        .gap(2)
+        .child(
+            heading("资源包工作台", 18, "1"),
+        )
+        .child(
+            span(
+                &format!(
+                    "{} · {} 个固件文件 · {} 项替换（图标 {}）",
                     if state.firmware_name.is_empty() {
-                        "选择固件"
+                        "未加载固件".into()
                     } else {
-                        "更换固件"
+                        format_firmware_name(&state.firmware_name)
                     },
-                    "firmware.upload",
-                    "soft",
-                    "gray",
-                )
-                .disabled_if(state.busy),
+                    state.file_count,
+                    state.replacement_count,
+                    state.icon_replacement_count
+                ),
+                12,
             )
-            .child(button("导入 .crpack", "pack.import", "soft", "gray").disabled_if(state.busy))
-            .child(
-                button("导出 .crpack", "pack.export", "solid", "accent")
-                    .disabled_if(state.busy || (state.replacement_count == 0 && !feature_edits)),
-            ),
+            .text_color("gray"),
+        );
+
+    let actions = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .align_center()
+        .gap(8)
+        .child(
+            button("撤销", "project.undo", "ghost", "gray")
+                .disabled_if(state.busy || !state.can_undo),
+        )
+        .child(
+            button("重做", "project.redo", "ghost", "gray")
+                .disabled_if(state.busy || !state.can_redo),
+        )
+        .child(
+            button(
+                if state.firmware_name.is_empty() {
+                    "选择固件"
+                } else {
+                    "更换固件"
+                },
+                "firmware.upload",
+                "soft",
+                "gray",
+            )
+            .disabled_if(state.busy),
+        )
+        .child(button("导入 .crpack", "pack.import", "soft", "gray").disabled_if(state.busy))
+        .child(
+            button("导出 .crpack", "pack.export", "solid", "accent")
+                .disabled_if(state.busy || (state.replacement_count == 0 && !feature_edits)),
+        );
+
+    root = root.child(
+        ui::Element::new(ui::ElementType::Div, None)
+            .flex()
+            .flex_direction(ui::FlexDirection::Row)
+            .width_full()
+            .align_center()
+            .justify_start()
+            .gap(12)
+            .child(heading)
+            .child(actions),
     );
-    let mut navigation = ui::Element::new(ui::ElementType::Grid, None)
-        .grid_template_columns("repeat(auto-fit, minmax(min(100%, 160px), 1fr))")
-        .gap(8);
+    // Tab semantics ride on ARIA: the host has no dedicated tab element, and a
+    // row of buttons tells assistive tech nothing about mutual exclusivity.
+    let mut navigation = ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .gap(8)
+        .prop("role", "tablist");
     for tab in [
         WorkbenchTab::Resources,
         WorkbenchTab::Backgrounds,
         WorkbenchTab::Calendar,
         WorkbenchTab::Metadata,
     ] {
+        let selected = tab == state.workbench_tab;
         navigation = navigation.child(
             button(
                 tab.name(),
                 &format!("tab:{}", tab.key()),
-                if tab == state.workbench_tab {
-                    "solid"
-                } else {
-                    "soft"
-                },
-                if tab == state.workbench_tab {
-                    "accent"
-                } else {
-                    "gray"
-                },
+                if selected { "solid" } else { "soft" },
+                if selected { "accent" } else { "gray" },
             )
-            .disabled_if(state.busy),
+            .prop("role", "tab")
+            .prop(
+                "aria-selected",
+                if selected { "true" } else { "false" },
+            )
+            .disabled_if(state.busy_blocks_navigation),
         );
     }
-    root = root.child(navigation).child(text(
-        &format!(
-            "{} · {} 个固件文件 · {} 项替换（图标 {}）",
-            if state.firmware_name.is_empty() {
-                "未加载固件".into()
-            } else {
-                format_firmware_name(&state.firmware_name)
-            },
-            state.file_count,
-            state.replacement_count,
-            state.icon_replacement_count
-        ),
-        12,
-    ));
-    root = match state.workbench_tab {
+    // Status sits directly under the controls that trigger it, not at the very
+    // bottom of a long scrolling page.
+    root = root
+        .child(navigation)
+        .child(build_status(&state));
+    match state.workbench_tab {
         WorkbenchTab::Resources => {
-            let mut resources = root.child(
-                ui::Element::new(ui::ElementType::Grid, None)
-                    .grid_template_columns("repeat(auto-fit, minmax(min(100%, 340px), 1fr))")
-                    .gap(12)
-                    .child(build_browser(&state))
-                    .child(build_inspector(&state)),
-            );
+            // Single column: put the inspector directly after the browser so a
+            // click in the list has its effect on screen. The disclosure buttons
+            // and their panels follow, instead of splitting the pair apart.
+            let narrow = current_env().width < 720 && current_env().width > 0;
+            let mut resources = if narrow {
+                root.child(
+                    ui::Element::new(ui::ElementType::Div, None)
+                        .flex()
+                        .flex_direction(ui::FlexDirection::Column)
+                        .width_full()
+                        .gap(12)
+                        .child(build_browser(&state))
+                        .child(build_inspector(&state)),
+                )
+            } else {
+                root.child(
+                    ui::Element::new(ui::ElementType::Grid, None)
+                        .grid_template_columns("repeat(auto-fit, minmax(min(100%, 340px), 1fr))")
+                        .gap(12)
+                        .child(build_browser(&state))
+                        .child(build_inspector(&state)),
+                )
+            };
             resources = resources.child(
                 button(
                     if state.custom_expanded {
@@ -4521,8 +4938,7 @@ fn build_main_ui(state: UiSnapshot) -> ui::Element {
         WorkbenchTab::Backgrounds => root.child(build_system_backgrounds(&state)),
         WorkbenchTab::Calendar => root.child(build_calendar_studio(&state)),
         WorkbenchTab::Metadata => root.child(build_metadata(&state)),
-    };
-    root.child(build_status(&state))
+    }
 }
 
 fn build_system_backgrounds(state: &UiSnapshot) -> ui::Element {
@@ -4672,7 +5088,7 @@ fn build_background_card(state: &UiSnapshot, current_surface: BgSurface) -> ui::
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(10)
-        .child(text(current_surface.name(), 17))
+        .child(heading(current_surface.name(), 15, "3"))
         .child(mode_selector)
         .child(details)
 }
@@ -4700,7 +5116,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
         .flex()
         .align_center()
         .gap(8)
-        .child(text("📅 动态日历图标工坊 (Dynamic Calendar Studio)", 17).flex_grow(1.0))
+        .child(heading("动态日历图标工坊", 15, "2").flex_grow(1.0))
         .child(
             button(
                 if enabled {
@@ -4748,7 +5164,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
         .gap(6)
         .child(
             button(
-                "📅 日期 (Day)",
+                "日期 (Day)",
                 "calendar.tab:day",
                 if cal.active_tab == CalendarActiveTab::Day {
                     "solid"
@@ -4765,7 +5181,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
         )
         .child(
             button(
-                "🌙 月份 (Month)",
+                "月份 (Month)",
                 "calendar.tab:month",
                 if cal.active_tab == CalendarActiveTab::Month {
                     "solid"
@@ -4782,7 +5198,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
         )
         .child(
             button(
-                "📆 星期 (Weekday)",
+                "星期 (Weekday)",
                 "calendar.tab:weekday",
                 if cal.active_tab == CalendarActiveTab::Weekday {
                     "solid"
@@ -5033,11 +5449,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
                 ))
                 .child(badge(
                     &format!("当前素材：{}/{} 张已就绪", ready, expected),
-                    if context.len() == expected && ready == expected {
-                        "accent"
-                    } else {
-                        "gray"
-                    },
+                    "gray",
                 ));
             let mut grid = ui::Element::new(ui::ElementType::Grid, None)
                 .grid_template_columns("repeat(auto-fit, minmax(min(100%, 180px), 1fr))")
@@ -5089,7 +5501,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
                 ui::Element::new(ui::ElementType::ScrollArea, None)
                     .prop("type", "auto")
                     .prop("scrollbars", "vertical")
-                    .height(320)
+                    .height(list_height(0.75))
                     .width_full()
                     .child(grid),
             );
@@ -5115,11 +5527,21 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
         _ => "周日",
     };
 
+    let canvas_bg = if current_env().dark {
+        "#161618"
+    } else {
+        "#E8E8ED"
+    };
+    let guide_color = if current_env().dark {
+        "#777777"
+    } else {
+        "#A0A0A8"
+    };
     let mut preview_box = ui::Element::new(ui::ElementType::Div, None)
         .width(112)
         .height(112)
         .relative()
-        .bg("#161618")
+        .bg(canvas_bg)
         .radius(12);
 
     if let Some(uri) = &state.calendar_bg_preview_uri {
@@ -5144,7 +5566,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
                     .top(0)
                     .width(1)
                     .height(112)
-                    .bg("#777777"),
+                    .bg(guide_color),
             )
             .child(
                 ui::Element::new(ui::ElementType::Div, None)
@@ -5153,7 +5575,7 @@ fn build_calendar_studio(state: &UiSnapshot) -> ui::Element {
                     .top(56)
                     .width(112)
                     .height(1)
-                    .bg("#777777"),
+                    .bg(guide_color),
             );
     }
     for (item, label, native_size) in [
@@ -5271,12 +5693,18 @@ fn build_custom_rules(state: &UiSnapshot) -> ui::Element {
         .flex().flex_direction(ui::FlexDirection::Column).width_full().gap(10)
         .child(
             ui::Element::new(ui::ElementType::Div, None).flex().align_center().gap(8)
-                .child(text("自定义规则", 17).flex_grow(1.0))
+                .child(heading("自定义规则", 15, "2").flex_grow(1.0))
                 .child(badge(&format!("{} 条规则", state.custom_rules.len()), "gray"))
                 .child(button("撤销上次修改", "custom.undo", "ghost", "gray").disabled_if(state.busy || !state.can_undo_rule)),
         )
         .child(text("填写设备上的绝对文件路径，选择文件，再添加规则。无需固件；路径是否存在仅能在设备运行时验证。", 13))
-        .child(field("运行时来源路径", &draft.source, "custom.source", "/data/example/icon.bin"))
+        .child(field_with_error(
+            "运行时来源路径",
+            &draft.source,
+            "custom.source",
+            "/data/example/icon.bin",
+            state.field_errors.get("custom.source").map(String::as_str),
+        ))
         .child(
             ui::Element::new(ui::ElementType::Grid, None)
                 .grid_template_columns("repeat(auto-fit, minmax(min(100%, 150px), 1fr))").gap(8).width_full()
@@ -5324,14 +5752,14 @@ fn build_custom_rules(state: &UiSnapshot) -> ui::Element {
                 content = content.child(
                     ui::Element::new(ui::ElementType::Div, None)
                         .width_full()
-                        .height(220)
+                        .height(preview_height(220))
                         .flex()
                         .justify_center()
                         .align_center()
                         .child(
                             ui::Element::new(ui::ElementType::Image, Some(uri))
                                 .max_width(280)
-                                .max_height(220)
+                                .max_height(preview_height(220))
                                 .prop("alt", &format!("自定义资源预览：{}", draft.source))
                                 .prop("draggable", "false"),
                         ),
@@ -5370,7 +5798,13 @@ fn build_custom_rules(state: &UiSnapshot) -> ui::Element {
     );
     if draft.advanced {
         content = content
-            .child(field("归档目标（留空自动生成）", &draft.destination, "custom.destination", "custom/<hash>.bin"))
+            .child(field_with_error(
+                "归档目标（留空自动生成）",
+                &draft.destination,
+                "custom.destination",
+                "custom/<hash>.bin",
+                state.field_errors.get("custom.destination").map(String::as_str),
+            ))
             .child(text("目录规则：来源与目标都以 / 结尾。下方填写每次上传的归档文件路径；同一目录规则可多次上传。规则按清单顺序保留。", 12))
             .child(field("目录内归档文件路径（单文件无需填写）", &draft.asset_path, "custom.asset_path", "custom/icons/home.bin"))
             .child(
@@ -5388,7 +5822,7 @@ fn build_custom_rules(state: &UiSnapshot) -> ui::Element {
     let mut list = ui::Element::new(ui::ElementType::ScrollArea, None)
         .prop("type", "auto")
         .prop("scrollbars", "vertical")
-        .height(280)
+        .height(list_height(0.65))
         .width_full()
         .flex()
         .flex_direction(ui::FlexDirection::Column)
@@ -5490,18 +5924,7 @@ fn custom_conversion_controls_visible(state: &UiSnapshot) -> bool {
 
 fn build_template_conversion_controls(state: &UiSnapshot) -> ui::Element {
     let setting = |label: &str, handler: &str, checked: bool| {
-        ui::Element::new(ui::ElementType::Div, None)
-            .flex()
-            .align_center()
-            .gap(8)
-            .child(
-                ui::Element::new(ui::ElementType::Checkbox, None)
-                    .prop("checked", if checked { "true" } else { "false" })
-                    .prop("size", "2")
-                    .on(ui::Event::Change, handler)
-                    .disabled_if(state.busy),
-            )
-            .child(text(label, 13))
+        checkbox_row(label, handler, checked, state.busy)
     };
     ui::Element::new(ui::ElementType::Div, None)
         .flex()
@@ -5540,56 +5963,31 @@ fn build_app_icons(state: &UiSnapshot) -> ui::Element {
         .width_full()
         .gap(8)
         .child(
-            field(
+            field_with_error(
                 "快应用包名",
                 &state.quickapp_package,
                 "icons.quickapp.package",
                 "输入包名",
+                state
+                    .field_errors
+                    .get("icons.quickapp.package")
+                    .map(String::as_str),
             )
             .flex_grow(1.0),
         )
         .child(button("添加", "icons.quickapp.add", "soft", "accent").disabled_if(state.busy));
-    let smooth_resize = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .align_center()
-        .gap(8)
-        .child(
-            ui::Element::new(ui::ElementType::Checkbox, None)
-                .prop(
-                    "checked",
-                    if state.resize_filter == lvgl::ResizeFilter::Lanczos3 {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
-                .prop("size", "2")
-                .on(ui::Event::Change, "pack.smooth_resize")
-                .disabled_if(state.busy),
-        )
-        .child(text(
-            "启用平滑抗锯齿缩放（Lanczos3，未勾选时为像素最近邻）",
-            13,
-        ));
-    let quantize = ui::Element::new(ui::ElementType::Div, None)
-        .flex()
-        .align_center()
-        .gap(8)
-        .child(
-            ui::Element::new(ui::ElementType::Checkbox, None)
-                .prop(
-                    "checked",
-                    if state.allow_quantize {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
-                .prop("size", "2")
-                .on(ui::Event::Change, "pack.quantize")
-                .disabled_if(state.busy),
-        )
-        .child(text("允许调色板颜色超限时进行有损量化（PNG 转换）", 13));
+    let smooth_resize = checkbox_row(
+        "启用平滑抗锯齿缩放（Lanczos3，未勾选时为像素最近邻）",
+        "pack.smooth_resize",
+        state.resize_filter == lvgl::ResizeFilter::Lanczos3,
+        state.busy,
+    );
+    let quantize = checkbox_row(
+        "允许调色板颜色超限时进行有损量化（PNG 转换）",
+        "pack.quantize",
+        state.allow_quantize,
+        state.busy,
+    );
     ui::Element::new(ui::ElementType::Card, None)
         .prop("variant", "surface")
         .prop("size", "2")
@@ -5599,7 +5997,7 @@ fn build_app_icons(state: &UiSnapshot) -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .align_start()
         .gap(10)
-        .child(text("第三方应用图标", 17))
+        .child(heading("第三方应用图标", 15, "2"))
         .child(add)
         .child(smooth_resize)
         .child(quantize)
@@ -5636,7 +6034,7 @@ fn build_icon_card(icon: &IconSnapshot, canopus: bool, busy: bool) -> ui::Elemen
     }
     let preview = ui::Element::new(ui::ElementType::Div, None)
         .width_full()
-        .height(140)
+        .height(preview_height(140))
         .flex()
         .justify_center()
         .align_center();
@@ -5659,7 +6057,7 @@ fn build_icon_card(icon: &IconSnapshot, canopus: bool, busy: bool) -> ui::Elemen
         ))
     });
     if let Some(size) = icon.size {
-        content = content.child(badge(&format!("已替换 · {}", format_bytes(size)), "accent"));
+        content = content.child(badge(&format!("已修改 · {}", format_bytes(size)), "gray"));
     }
     let mut actions = ui::Element::new(ui::ElementType::Grid, None)
         .grid_template_columns("repeat(2, 1fr)")
@@ -5712,7 +6110,7 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
                 },
             )
             .prop("size", "1")
-            .disabled_if(state.busy),
+            .disabled_if(state.busy_blocks_navigation),
         )
         .child(
             button(
@@ -5730,11 +6128,11 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
                 },
             )
             .prop("size", "1")
-            .disabled_if(state.busy),
+            .disabled_if(state.busy_blocks_navigation),
         )
         .child(
             button(
-                &format!("已替换 {}", state.firmware_replacement_count),
+                &format!("已修改 {}", state.firmware_replacement_count),
                 "browser.filter:replaced",
                 if state.filter_mode == ResourceFilter::Replaced {
                     "solid"
@@ -5743,24 +6141,22 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
                 } else {
                     "ghost"
                 },
-                if state.filter_mode == ResourceFilter::Replaced
-                    || state.firmware_replacement_count > 0
-                {
+                if state.filter_mode == ResourceFilter::Replaced {
                     "accent"
                 } else {
                     "gray"
                 },
             )
             .prop("size", "1")
-            .disabled_if(state.busy),
+            .disabled_if(state.busy_blocks_navigation),
         );
 
-    let heading = ui::Element::new(ui::ElementType::Div, None)
+    let title_row = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
         .width_full()
         .align_center()
-        .child(text("资源浏览", 16).flex_grow(1.0))
+        .child(heading("资源浏览", 15, "2").flex_grow(1.0))
         .child(pills);
 
     let breadcrumbs = build_breadcrumbs(state);
@@ -5781,17 +6177,17 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
         .align_center()
         .gap(6)
         .child(search)
-        .child(button("筛选", "browser.apply-search", "soft", "gray").disabled_if(state.busy));
+        .child(button("筛选", "browser.apply-search", "soft", "gray").disabled_if(state.busy_blocks_navigation));
 
     if !state.search_query.trim().is_empty() {
         search_row = search_row
-            .child(button("清空", "browser.clear-search", "ghost", "gray").disabled_if(state.busy));
+            .child(button("清空", "browser.clear-search", "ghost", "gray").disabled_if(state.busy_blocks_navigation));
     }
 
     let mut list = ui::Element::new(ui::ElementType::ScrollArea, None)
         .prop("type", "auto")
         .prop("scrollbars", "vertical")
-        .height(440)
+        .height(list_height(1.0))
         .width_full()
         .radius(12)
         .padding(4)
@@ -5800,29 +6196,55 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
         .gap(4);
 
     if state.entries.is_empty() {
-        let empty_tip = if state.filter_mode == ResourceFilter::Replaced {
-            "暂无已替换资源。可从文件树选择文件，在右侧替换 PNG 或二进制。"
-        } else if state.filter_mode == ResourceFilter::Images {
-            "当前目录下没有图片资源。"
-        } else if !state.search_query.is_empty() {
-            "没有找到匹配的资源。"
+        // With no firmware loaded there is nothing to browse, so answer the
+        // wayfinding question directly: what is this, and what do I do first?
+        if state.firmware_name.is_empty() {
+            list = list.child(
+                ui::Element::new(ui::ElementType::Div, None)
+                    .padding(16)
+                    .flex()
+                    .flex_direction(ui::FlexDirection::Column)
+                    .justify_center()
+                    .align_center()
+                    .gap(10)
+                    .child(heading("尚未加载固件", 15, "3"))
+                    .child(
+                        text(
+                            "加载固件后可浏览并替换其中的图片资源。自定义规则与第三方应用图标无需固件，可直接添加。",
+                            13,
+                        )
+                        .text_color("gray"),
+                    )
+                    .child(
+                        button("选择固件", "firmware.upload", "solid", "accent")
+                            .disabled_if(state.busy),
+                    ),
+            );
         } else {
-            "此目录没有可浏览的文件。"
-        };
-        list = list.child(
-            ui::Element::new(ui::ElementType::Div, None)
-                .padding(16)
-                .flex()
-                .justify_center()
-                .align_center()
-                .child(text(empty_tip, 13)),
-        );
+            let empty_tip = if state.filter_mode == ResourceFilter::Replaced {
+                "暂无已修改资源。可从文件树选择文件，在右侧替换 PNG 或二进制。"
+            } else if state.filter_mode == ResourceFilter::Images {
+                "当前目录下没有图片资源。"
+            } else if !state.search_query.is_empty() {
+                "没有找到匹配的资源。"
+            } else {
+                "此目录没有可浏览的文件。"
+            };
+            list = list.child(
+                ui::Element::new(ui::ElementType::Div, None)
+                    .padding(16)
+                    .flex()
+                    .justify_center()
+                    .align_center()
+                    .child(text(empty_tip, 13)),
+            );
+        }
     } else {
         let show_full_path =
             !state.search_query.is_empty() || state.filter_mode == ResourceFilter::Replaced;
         for entry in &state.entries {
             let row = if entry.is_directory {
-                build_directory_row(entry, state.busy)
+                build_directory_row(entry, state.busy_blocks_navigation)
             } else {
                 let is_selected = state.selected_path.as_deref() == Some(entry.path.as_str());
                 let current_size = state
@@ -5836,7 +6258,7 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
                     is_selected,
                     current_size,
                     show_full_path,
-                    state.busy,
+                    state.busy_blocks_navigation,
                 )
             };
             list = list.child(row);
@@ -5862,7 +6284,7 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(8)
-        .child(heading)
+        .child(title_row)
         .child(breadcrumbs)
         .child(search_row)
         .child(list);
@@ -5894,17 +6316,13 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
                     .align_center()
                     .gap(6)
                     .flex_grow(1.0)
-                    .child(span("✏️", 13))
-                    .child(span("全部已修改资源清单", 13))
-                    .child(badge(
-                        &format!("{} 项", state.firmware_replacement_count),
-                        "accent",
-                    )),
+                    .child(span("全部已修改资源", 13))
+                    .child(badge(&format!("{} 项", state.firmware_replacement_count), "gray")),
             )
             .child(
                 button("返回目录浏览", "browser.filter:all", "ghost", "gray")
                     .prop("size", "1")
-                    .disabled_if(state.busy),
+                    .disabled_if(state.busy_blocks_navigation),
             );
     }
 
@@ -5922,7 +6340,6 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
                     .align_center()
                     .gap(6)
                     .flex_grow(1.0)
-                    .child(span("🔍", 13))
                     .child(span(
                         &format!("搜索: \"{}\"", state.search_query.trim()),
                         13,
@@ -5932,7 +6349,7 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
             .child(
                 button("清空搜索", "browser.clear-search", "ghost", "gray")
                     .prop("size", "1")
-                    .disabled_if(state.busy),
+                    .disabled_if(state.busy_blocks_navigation),
             );
     }
 
@@ -5946,13 +6363,13 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
     let is_root = state.current_dir.is_empty();
     trail = trail.child(
         button(
-            "🏠 resource",
+            "resource",
             "browser.open:",
             if is_root { "soft" } else { "ghost" },
             if is_root { "accent" } else { "gray" },
         )
         .prop("size", "1")
-        .disabled_if(state.busy),
+        .disabled_if(state.busy_blocks_navigation),
     );
 
     if !is_root {
@@ -5969,7 +6386,7 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
             }
             accumulated.push_str(segment);
             let is_last = idx + 1 == total;
-            trail = trail.child(span("/", 11));
+            trail = trail.child(span("/", 12));
             trail = trail.child(
                 button(
                     segment,
@@ -5978,7 +6395,7 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
                     if is_last { "accent" } else { "gray" },
                 )
                 .prop("size", "1")
-                .disabled_if(state.busy),
+                .disabled_if(state.busy_blocks_navigation),
             );
         }
     }
@@ -5995,7 +6412,7 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
         bar = bar.child(
             button("← 上级", "browser.parent", "ghost", "gray")
                 .prop("size", "1")
-                .disabled_if(state.busy),
+                .disabled_if(state.busy_blocks_navigation),
         );
     }
 
@@ -6009,7 +6426,7 @@ fn build_directory_row(entry: &BrowserEntry, busy: bool) -> ui::Element {
         .align_center()
         .gap(8)
         .flex_grow(1.0)
-        .child(span("📁", 13))
+        .child(span("▸", 13).text_color("gray"))
         .child(span(&format!("{}/", entry.name), 13));
 
     let mut right = ui::Element::new(ui::ElementType::Div, None)
@@ -6020,7 +6437,7 @@ fn build_directory_row(entry: &BrowserEntry, busy: bool) -> ui::Element {
         .flex_shrink(0.0);
 
     if entry.has_replacements {
-        right = right.child(badge("● 含修改", "accent"));
+        right = right.child(span("●", 12).text_color("gray").prop("title", "含已修改资源"));
     }
     if entry.child_count > 0 {
         right = right.child(span(&format!("{} 项", entry.child_count), 12));
@@ -6041,7 +6458,10 @@ fn build_directory_row(entry: &BrowserEntry, busy: bool) -> ui::Element {
         .on(ui::Event::Click, &format!("browser.open:{}", entry.path))
         .disabled_if(busy);
 
-    row.child(left).child(right)
+    // Spacer keeps directory rows aligned with the selection bar of file rows.
+    row.child(selected_indicator(false))
+        .child(left)
+        .child(right)
 }
 
 fn build_file_row(
@@ -6075,13 +6495,9 @@ fn build_file_row(
             .align_center()
             .child(thumbnail)
     } else {
-        let ext = file_extension(&entry.name).unwrap_or_default();
-        let icon = if ext == "bin" || ext == "dat" {
-            "📦"
-        } else {
-            "📄"
-        };
-        span(icon, 13)
+        // The extension badge beside it already identifies the format; a glyph
+        // only needs to show "this is a file, not a folder".
+        span("·", 13).text_color("gray")
     };
 
     let display_name = if show_full_path {
@@ -6112,28 +6528,27 @@ fn build_file_row(
         right = right.child(badge(&ext.to_ascii_uppercase(), "gray"));
     }
 
+    // "Modified" is a neutral property, not the current focus: a greyed dot keeps
+    // it legible without flooding the list with accent colour.
     if entry.has_replacements {
-        right = right.child(badge("已替换", "accent"));
+        right = right.child(span("●", 12).text_color("gray").prop("title", "已修改"));
     }
 
     right = right.child(span(&format_bytes(current_size), 12));
 
+    // Selection is signalled by its own channel (a leading accent bar plus a
+    // border), not by a variant tweak: `soft` and `surface` are nearly
+    // indistinguishable, so variant alone cannot say "this is the current row".
     let mut row = ui::Element::new(ui::ElementType::Button, None)
         .prop("size", "2")
         .prop("radius", "medium")
-        .prop(
-            "variant",
-            if selected {
-                "soft"
-            } else if entry.has_replacements {
-                "surface"
-            } else {
-                "ghost"
-            },
-        );
+        .prop("variant", if selected { "soft" } else { "ghost" });
 
-    if !selected && !entry.has_replacements {
+    if !selected {
         row = row.prop("color", "gray");
+    }
+    if selected {
+        row = row.prop("aria-current", "true").border(1, "accent");
     }
 
     row.width_full()
@@ -6144,8 +6559,29 @@ fn build_file_row(
         .padding_right(8)
         .on(ui::Event::Click, &format!("browser.select:{}", entry.path))
         .disabled_if(busy)
+        .child(selected_indicator(selected))
         .child(left)
         .child(right)
+}
+
+/// Vertical accent bar marking the currently selected row.
+///
+/// Uses a real element rather than a border-left so it reads at the same optical
+/// weight regardless of the row's own variant.
+fn selected_indicator(selected: bool) -> ui::Element {
+    if selected {
+        ui::Element::new(ui::ElementType::Div, None)
+            .width(3)
+            .height(20)
+            .radius(2)
+            .bg("accent")
+            .flex_shrink(0.0)
+    } else {
+        ui::Element::new(ui::ElementType::Div, None)
+            .width(3)
+            .height(20)
+            .flex_shrink(0.0)
+    }
 }
 
 fn build_inspector(state: &UiSnapshot) -> ui::Element {
@@ -6154,13 +6590,14 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(10)
-        .child(text(
+        .child(heading(
             if state.firmware_name.is_empty() {
                 "资源包信息"
             } else {
                 "预览与替换"
             },
-            17,
+            15,
+            "2",
         ));
 
     if let Some(path) = state.selected_path.as_deref() {
@@ -6170,7 +6607,7 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
             .flex_direction(ui::FlexDirection::Column)
             .width_full()
             .gap(4)
-            .child(text(path, 14))
+            .child(text(path, 13))
             .child(text(
                 &format!(
                     "{} · {}{}",
@@ -6179,7 +6616,7 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
                         .map(format_bytes)
                         .unwrap_or_else(|| "未知大小".into()),
                     if state.selected_replaced {
-                        "已替换"
+                        "已修改"
                     } else {
                         "固件原始资源"
                     },
@@ -6209,7 +6646,7 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
             selection = selection.child(
                 ui::Element::new(ui::ElementType::Div, None)
                     .width_full()
-                    .height(320)
+                    .height(preview_height(320))
                     .flex()
                     .justify_center()
                     .align_center()
@@ -6240,7 +6677,7 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
             );
         content = content
             .child(extract_buttons)
-            .child(text("若资源已替换，将提取替换后的版本。", 12));
+            .child(text("若资源已修改，将提取修改后的版本。", 12));
 
         let image_buttons = ui::Element::new(ui::ElementType::Div, None)
             .flex()
@@ -6256,51 +6693,19 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
         content = content.child(image_buttons);
 
         if state.selected_template_image {
-            let smooth_checkbox = ui::Element::new(ui::ElementType::Checkbox, None)
-                .prop(
-                    "checked",
-                    if state.resize_filter == lvgl::ResizeFilter::Lanczos3 {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
-                .prop("size", "2")
-                .on(ui::Event::Change, "pack.smooth_resize")
-                .disabled_if(state.busy);
-            content = content.child(
-                ui::Element::new(ui::ElementType::Div, None)
-                    .flex()
-                    .flex_direction(ui::FlexDirection::Row)
-                    .align_center()
-                    .gap(8)
-                    .child(smooth_checkbox)
-                    .child(text(
-                        "启用平滑抗锯齿缩放（Lanczos3，未勾选时为像素最近邻）",
-                        13,
-                    )),
-            );
-
-            let checkbox = ui::Element::new(ui::ElementType::Checkbox, None)
-                .prop(
-                    "checked",
-                    if state.allow_quantize {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
-                .prop("size", "2")
-                .on(ui::Event::Change, "pack.quantize");
-            content = content.child(
-                ui::Element::new(ui::ElementType::Div, None)
-                    .flex()
-                    .flex_direction(ui::FlexDirection::Row)
-                    .align_center()
-                    .gap(8)
-                    .child(checkbox)
-                    .child(text("允许调色板颜色超限时进行有损量化", 13)),
-            );
+            content = content
+                .child(checkbox_row(
+                    "启用平滑抗锯齿缩放（Lanczos3，未勾选时为像素最近邻）",
+                    "pack.smooth_resize",
+                    state.resize_filter == lvgl::ResizeFilter::Lanczos3,
+                    state.busy,
+                ))
+                .child(checkbox_row(
+                    "允许调色板颜色超限时进行有损量化",
+                    "pack.quantize",
+                    state.allow_quantize,
+                    state.busy,
+                ));
         }
         if state.selected_replaced {
             content = content.child(
@@ -6308,7 +6713,7 @@ fn build_inspector(state: &UiSnapshot) -> ui::Element {
             );
         }
     } else if !state.firmware_name.is_empty() {
-        content = content.child(text("选择左侧文件；图片资源会显示预览。", 14));
+        content = content.child(text("选择左侧文件；图片资源会显示预览。", 13));
     }
 
     ui::Element::new(ui::ElementType::Card, None)
@@ -6321,12 +6726,18 @@ fn build_metadata(state: &UiSnapshot) -> ui::Element {
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .gap(10)
-        .child(text("资源包信息", 17));
+        .child(heading("资源包信息", 15, "2"));
     let metadata = ui::Element::new(ui::ElementType::Grid, None)
         .grid_template_columns("repeat(auto-fit, minmax(min(100%, 180px), 1fr))")
         .gap(8)
         .width_full()
-        .child(field("包标识", &state.theme_id, "pack.id", "corona"))
+        .child(field_with_error(
+            "包标识",
+            &state.theme_id,
+            "pack.id",
+            "corona",
+            state.field_errors.get("pack.id").map(String::as_str),
+        ))
         .child(field(
             "包名称",
             &state.pack_name,
@@ -6334,11 +6745,12 @@ fn build_metadata(state: &UiSnapshot) -> ui::Element {
             "Corona Resource Pack",
         ))
         .child(field("版本名", &state.version, "pack.version", "1.0.0"))
-        .child(field(
+        .child(field_with_error(
             "版本号（数字）",
             &state.version_code,
             "pack.version_code",
             "1",
+            state.field_errors.get("pack.version_code").map(String::as_str),
         ))
         .child(field("作者（可选）", &state.author, "pack.author", ""))
         .child(field(
@@ -6373,16 +6785,124 @@ fn build_status(state: &UiSnapshot) -> ui::Element {
         .flex_direction(ui::FlexDirection::Row)
         .width_full()
         .align_center()
-        .child(text(&state.status, 13));
+        .gap(8);
+
+    if state.busy {
+        // An indeterminate spinner tells the user work is actually happening.
+        // A static sentence alone reads the same as a hung UI.
+        status = status.child(
+            ui::Element::new(ui::ElementType::Div, None)
+                .width(14)
+                .height(14)
+                .radius(7)
+                .border(2, "gray")
+                .flex_shrink(0.0)
+                .animation_preset("spin")
+                .animation_duration_ms(900)
+                .animation_iteration_count("infinite")
+                .prop("aria-hidden", "true"),
+        );
+    }
+
+    status = status.child(text(&state.status, 13).flex_grow(1.0));
+
     if let Some(error) = &state.error {
         status = status.child(badge(error, "red"));
     }
     status
 }
 
+/// Validate one text field's committed value.
+///
+/// Runs on blur rather than on submit: the user sees what is wrong while the
+/// field is still on screen, instead of after pressing "add rule".
+fn validate_field(event_id: &str, value: &str) -> Result<(), String> {
+    match event_id {
+        "custom.source" => {
+            if value.trim().is_empty() {
+                return Err("来源路径不能为空。".into());
+            }
+            crpack::validate_absolute_source(value)?;
+            if value.starts_with(app_icons::QUICKAPP_SOURCE_PREFIX)
+                || value == app_icons::CANOPUS_SOURCE
+            {
+                return Err("应用图标请使用上方的应用图标卡片添加。".into());
+            }
+            Ok(())
+        }
+        "custom.destination" => {
+            if value.trim().is_empty() {
+                return Ok(());
+            }
+            crpack::validate_relative_destination(value)
+        }
+        "icons.quickapp.package" => {
+            if value.trim().is_empty() {
+                return Err("请输入快应用包名。".into());
+            }
+            app_icons::validate_package(value)
+        }
+        "pack.id" => {
+            if value.trim().is_empty() {
+                return Err("包标识不能为空；导出时会作为文件名。".into());
+            }
+            if value.contains('/') || value.contains('\\') || value.contains("..") {
+                return Err("包标识会用于导出文件名，不能包含路径分隔符。".into());
+            }
+            Ok(())
+        }
+        "pack.version_code" => {
+            if value.trim().is_empty() {
+                return Ok(());
+            }
+            match parse_version_code(value) {
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A checkbox with its label text beside it.
+///
+/// The host exposes no <label> element, so the accessible name is set on the
+/// checkbox itself; otherwise a screen reader announces an unnamed control.
+fn checkbox_row(
+    label: &str,
+    handler: &str,
+    checked: bool,
+    busy: bool,
+) -> ui::Element {
+    ui::Element::new(ui::ElementType::Div, None)
+        .flex()
+        .flex_direction(ui::FlexDirection::Row)
+        .align_center()
+        .gap(8)
+        .child(
+            ui::Element::new(ui::ElementType::Checkbox, None)
+                .prop("checked", if checked { "true" } else { "false" })
+                .prop("aria-label", label)
+                .prop("size", "2")
+                .on(ui::Event::Change, handler)
+                .disabled_if(busy),
+        )
+        .child(text(label, 13))
+}
+
 fn field(label: &str, value: &str, event_id: &str, placeholder: &str) -> ui::Element {
+    field_with_error(label, value, event_id, placeholder, None)
+}
+
+fn field_with_error(
+    label: &str,
+    value: &str,
+    event_id: &str,
+    placeholder: &str,
+    error: Option<&str>,
+) -> ui::Element {
     let numeric = matches!(event_id, "calendar.x" | "calendar.y" | "calendar.size");
-    let input = ui::Element::new(ui::ElementType::Input, Some(value))
+    let mut input = ui::Element::new(ui::ElementType::Input, Some(value))
         .prop("type", if numeric { "number" } else { "text" })
         .prop("aria-label", label)
         .prop("placeholder", placeholder)
@@ -6391,13 +6911,27 @@ fn field(label: &str, value: &str, event_id: &str, placeholder: &str) -> ui::Ele
         .prop("radius", "medium")
         .width_full()
         .on(ui::Event::Change, event_id);
-    ui::Element::new(ui::ElementType::Div, None)
+    if validate_field(event_id, value).is_err() {
+        input = input.prop("aria-invalid", "true");
+    }
+    // Blur is safe to re-render on: focus has already left the input.
+    input = input.on(ui::Event::Blur, &format!("validate:{event_id}"));
+
+    let mut container = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(4)
         .child(text(label, 12))
-        .child(input)
+        .child(input);
+    if let Some(error) = error {
+        container = container.child(
+            text(error, 12)
+                .text_color("red")
+                .prop("role", "alert"),
+        );
+    }
+    container
 }
 
 fn format_firmware_name(name: &str) -> String {
@@ -6417,6 +6951,16 @@ fn text(content: &str, size: u32) -> ui::Element {
 
 fn span(content: &str, size: u32) -> ui::Element {
     ui::Element::new(ui::ElementType::Span, Some(content)).size(size)
+}
+
+/// A section title.
+///
+/// The host has no H1-H6 element, so heading semantics ride on ARIA instead;
+/// without this every block title is an undifferentiated paragraph.
+fn heading(content: &str, size: u32, level: &str) -> ui::Element {
+    text(content, size)
+        .prop("role", "heading")
+        .prop("aria-level", level)
 }
 
 fn badge(content: &str, color: &str) -> ui::Element {
@@ -7268,6 +7812,183 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    #[test]
+    fn heading_levels_are_distinct_for_page_and_sections() {
+        // The host has no H1-H6, so level is carried explicitly. Guard the
+        // constants the builders pass, since ARIA cannot be asserted on Element.
+        assert_eq!(WorkbenchTab::Resources.name(), "图标与资源");
+        // Tab labels carry no emoji: pictographs render inconsistently across
+        // fonts and cannot be colour-matched. Reject anything above the BMP.
+        for tab in [
+            WorkbenchTab::Resources,
+            WorkbenchTab::Backgrounds,
+            WorkbenchTab::Calendar,
+            WorkbenchTab::Metadata,
+        ] {
+            let label = tab.name();
+            assert!(
+                label.chars().all(|c| (c as u32) <= 0xFFFF),
+                "tab label still contains a pictograph: {label}"
+            );
+        }
+    }
+
+    fn list_height_falls_back_when_host_reports_no_size() {
+        // get_render_size returns 0 before mount; lists must still have height.
+        let mut env = host_env().lock().unwrap();
+        let saved = *env;
+        *env = HostEnv::default();
+        drop(env);
+        assert!(list_height(1.0) > 0);
+        assert!(preview_height(320) > 0);
+        let mut env = host_env().lock().unwrap();
+        *env = saved;
+    }
+
+    #[test]
+    fn list_height_scales_with_viewport_and_clamps() {
+        let mut env = host_env().lock().unwrap();
+        let saved = *env;
+
+        *env = HostEnv { width: 1200, height: 300, dark: true };
+        drop(env);
+        let small = list_height(1.0);
+        let mut env = host_env().lock().unwrap();
+        *env = HostEnv { width: 1200, height: 1200, dark: true };
+        drop(env);
+        let large = list_height(1.0);
+        assert!(large > small, "taller viewport should yield taller list");
+
+        // A preview frame never grows past the viewport.
+        let mut env = host_env().lock().unwrap();
+        *env = HostEnv { width: 400, height: 300, dark: true };
+        drop(env);
+        assert!(preview_height(320) <= 300);
+        assert!(preview_height(320) >= 120);
+
+        let mut env = host_env().lock().unwrap();
+        *env = saved;
+    }
+
+    fn inline_validation_rejects_bad_sources_before_submit() {
+        // Relative paths are the most common mistake and must be caught on blur.
+        assert!(validate_field("custom.source", "data/icon.bin").is_err());
+        assert!(validate_field("custom.source", "").is_err());
+        assert!(validate_field("custom.source", "/data/icon.bin").is_ok());
+        // Application keys have dedicated cards, not the generic rule editor.
+        assert!(validate_field("custom.source", "@quickapp-icon/pkg").is_err());
+        assert!(validate_field("custom.source", "/data/../etc").is_err());
+        assert!(validate_field("custom.source", "/data//icon.bin").is_err());
+    }
+
+    #[test]
+    fn inline_validation_of_destination_and_package() {
+        // Empty destination is auto-generated, so blank is not an error.
+        assert!(validate_field("custom.destination", "").is_ok());
+        assert!(validate_field("custom.destination", "custom/a.bin").is_ok());
+        assert!(validate_field("custom.destination", "/absolute").is_err());
+
+        assert!(validate_field("icons.quickapp.package", "").is_err());
+        assert!(validate_field("icons.quickapp.package", "ng.lst.corona").is_ok());
+        // Control bytes are forbidden by the mappings.tsv wire format.
+        assert!(validate_field("icons.quickapp.package", "bad\u{1}name").is_err());
+    }
+
+    #[test]
+    fn inline_validation_of_metadata_fields() {
+        assert!(validate_field("pack.id", "").is_err());
+        assert!(validate_field("pack.id", "corona").is_ok());
+        assert!(validate_field("pack.version_code", "").is_ok());
+        assert!(validate_field("pack.version_code", "12").is_ok());
+        assert!(validate_field("pack.version_code", "x").is_err());
+    }
+
+    #[test]
+    fn blur_records_error_and_edit_clears_it() {
+        let mut state = UiState::default();
+        state.custom_draft.source = "not/absolute".into();
+        // Mirror validate_on_blur without rendering.
+        let value = state.custom_draft.source.clone();
+        let result = validate_field("custom.source", &value);
+        assert!(result.is_err());
+        state
+            .field_errors
+            .insert("custom.source".into(), result.unwrap_err());
+        assert!(state.field_errors.contains_key("custom.source"));
+        state.field_errors.remove("custom.source");
+        assert!(state.field_errors.is_empty());
+    }
+
+    fn undo_stack_restores_project_after_icon_removal() {
+        let mut state = UiState::default();
+        state.custom_draft.source = "/data/icon.bin".into();
+        stage_custom(&mut state, b"icon-bytes", "icon.bin", CustomPick::Raw);
+        commit_custom_rule(&mut state).unwrap();
+        let destination = state.mappings[0].destination.clone();
+
+        // Removing an icon used to clear the single-slot undo, making it
+        // unrecoverable. The stack must survive it.
+        push_undo(&mut state);
+        state.replacements.remove(&destination);
+        assert!(state.replacements.is_empty());
+        assert!(undo_project(&mut state));
+        assert_eq!(state.replacements[&destination], b"icon-bytes");
+        assert_eq!(state.mappings.len(), 1);
+    }
+
+    #[test]
+    fn undo_and_redo_round_trip() {
+        let mut state = UiState::default();
+        state.custom_draft.source = "/data/a.bin".into();
+        stage_custom(&mut state, b"aaa", "a.bin", CustomPick::Raw);
+        commit_custom_rule(&mut state).unwrap();
+        let first = state.mappings[0].destination.clone();
+
+        push_undo(&mut state);
+        state.custom_draft.source = "/data/b.bin".into();
+        stage_custom(&mut state, b"bbb", "b.bin", CustomPick::Raw);
+        commit_custom_rule(&mut state).unwrap();
+        assert_eq!(state.mappings.len(), 2);
+
+        assert!(undo_project(&mut state));
+        assert_eq!(state.mappings.len(), 1);
+        assert_eq!(state.mappings[0].destination, first);
+
+        assert!(redo_project(&mut state));
+        assert_eq!(state.mappings.len(), 2);
+    }
+
+    #[test]
+    fn undo_stack_is_bounded_and_redo_clears_on_new_edit() {
+        let mut state = UiState::default();
+        for i in 0..(UNDO_LIMIT + 5) {
+            push_undo(&mut state);
+            state.mappings.push(Mapping {
+                source: format!("/data/{i}.bin"),
+                destination: format!("custom/{i}.bin"),
+            });
+        }
+        assert_eq!(state.undo_stack.len(), UNDO_LIMIT);
+
+        // A fresh edit invalidates the forward branch.
+        assert!(undo_project(&mut state));
+        assert!(!state.redo_stack.is_empty());
+        push_undo(&mut state);
+        assert!(state.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn undo_on_empty_stack_is_a_no_op() {
+        let mut state = UiState::default();
+        assert!(!undo_project(&mut state));
+        assert!(!redo_project(&mut state));
+        assert!(state.mappings.is_empty());
+    }
+
     fn rule_delete_cleans_only_unreferenced_authored_files_and_is_undoable() {
         let mut state = UiState::default();
         state.custom_draft.source = "/data/first.bin".into();
