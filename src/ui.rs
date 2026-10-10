@@ -872,7 +872,7 @@ fn snapshot(state: &mut UiState) -> UiSnapshot {
                 if let CalendarItemDraft::Image { context, .. } = item {
                     for path in context {
                         if let Some(bytes) = destination_bytes(state, path)
-                            && let Some(uri) = thumbnail_from_bytes(bytes)
+                            && let Some(uri) = preview_from_bytes(bytes).0
                         {
                             previews.insert(path.clone(), uri);
                         }
@@ -886,7 +886,7 @@ fn snapshot(state: &mut UiState) -> UiSnapshot {
             let b11 = "app/perpetual_calendar/launcher_icon.bin";
             resource_replacement(state, p67)
                 .or_else(|| resource_replacement(state, b11))
-                .and_then(thumbnail_from_bytes)
+                .and_then(|bytes| preview_from_bytes(bytes).0)
         },
         replacement_sizes: state
             .firmware
@@ -912,9 +912,7 @@ fn snapshot(state: &mut UiState) -> UiSnapshot {
         allow_quantize: state.allow_quantize,
         resize_filter: state.resize_filter,
         busy: state.busy(),
-        busy_blocks_navigation: state
-            .busy
-            .is_some_and(|kind| kind == BusyKind::Blocking),
+        busy_blocks_navigation: state.busy.is_some_and(|kind| kind == BusyKind::Blocking),
         status: state.status.clone(),
         error: state.error.clone(),
         field_errors: state.field_errors.clone(),
@@ -960,7 +958,9 @@ async fn process_click(event_id: &str) {
                     state.status = "规则未保存，现有文件保持不变。".into();
                     // Mirror the failure onto the field that caused it so the
                     // message sits next to the input, not only in the status line.
-                    state.field_errors.insert("custom.source".into(), error.clone());
+                    state
+                        .field_errors
+                        .insert("custom.source".into(), error.clone());
                     state.error = Some(error);
                 }
             }
@@ -1796,7 +1796,8 @@ async fn begin_firmware_pick() {
             psys_host::dialog::DialogStyle::System,
             psys_host::dialog::DialogInfo {
                 title: "更换固件？".into(),
-                content: "当前目录、搜索与选中项将被重置；已保存的规则、替换和图标会完整保留。".into(),
+                content: "当前目录、搜索与选中项将被重置；已保存的规则、替换和图标会完整保留。"
+                    .into(),
                 buttons: vec![
                     psys_host::dialog::DialogButton {
                         id: "cancel".into(),
@@ -3226,64 +3227,31 @@ fn parse_calendar_sequence_zip(
     validate_icon_budget(bytes.len(), 0, 0, false)?;
     let mut archive =
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("序列 ZIP 无效：{e}"))?;
-    if archive.len() > 128 {
-        return Err("序列 ZIP 条目过多（最多 128 项，包括目录）。".into());
-    }
     let expected = calendar_sequence_count(tab);
-    let mut entries = BTreeMap::new();
-    let mut names = BTreeSet::new();
-    let mut extension = None;
-    let mut parent = None;
+    let mut entries = Vec::new();
     let mut total = 0usize;
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
             .map_err(|e| format!("读取 ZIP 失败：{e}"))?;
         let name = file.name().to_string();
-        let path = name.strip_suffix('/').unwrap_or(&name);
-        if path.is_empty()
-            || name.starts_with('/')
-            || name.contains('\\')
-            || name.contains(':')
-            || path.split('/').any(|part| {
-                part.is_empty() || part == "." || part == ".." || part.chars().any(char::is_control)
-            })
-            || !names.insert(name.clone())
+        if file.is_dir()
+            || name
+                .split('/')
+                .any(|part| part.starts_with('.') || part == "__MACOSX")
+            || file
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
-            return Err("ZIP 包含不安全或重复路径。".into());
-        }
-        if file
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            return Err("ZIP 不允许符号链接。".into());
-        }
-        if file.is_dir() {
             continue;
         }
-        let (directory, leaf) = path.rsplit_once('/').unwrap_or(("", path));
-        let (number, ext) = leaf
+        let leaf = name.rsplit('/').next().unwrap_or(&name);
+        let ext = leaf
             .rsplit_once('.')
-            .ok_or("ZIP 只能包含编号 PNG / BIN 图片")?;
-        if !matches!(ext, "png" | "bin")
-            || number.len() != 2
-            || !number.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err("图片必须命名为 01.png…（或统一使用 .bin）。".into());
+            .map(|(_, ext)| ext.to_ascii_lowercase());
+        if !matches!(ext.as_deref(), Some("png" | "bin")) {
+            continue;
         }
-        let ordinal: usize = number.parse().map_err(|_| "无效图片编号")?;
-        if ordinal == 0 || ordinal > expected || entries.contains_key(&ordinal) {
-            return Err("图片编号重复或超出序列范围。".into());
-        }
-        if extension.as_ref().is_some_and(|previous| previous != ext)
-            || parent
-                .as_ref()
-                .is_some_and(|previous| previous != directory)
-        {
-            return Err("所有图片必须位于同一目录，且统一使用 PNG 或 BIN。".into());
-        }
-        extension = Some(ext.to_string());
-        parent = Some(directory.to_string());
         let remaining = MAX_ICON_BYTES.saturating_sub(total);
         if file.size() > remaining as u64 {
             return Err("ZIP 解压素材总量超过 64 MiB。".into());
@@ -3298,14 +3266,17 @@ fn parse_calendar_sequence_zip(
             return Err("ZIP 解压素材总量超过 64 MiB。".into());
         }
         total += data.len();
-        entries.insert(ordinal, (name, data));
+        entries.push((name, data));
     }
-    if entries.len() != expected {
-        return Err(format!(
-            "ZIP 必须包含恰好 {expected} 张图片，编号 01–{expected:02}。"
-        ));
+    if entries.is_empty() {
+        return Err("ZIP 中没有 PNG / BIN 图片。".into());
     }
-    Ok(entries.into_values().collect())
+    entries.sort_by(|a, b| {
+        let leaf = |name: &str| name.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+        leaf(&a.0).cmp(&leaf(&b.0)).then_with(|| a.0.cmp(&b.0))
+    });
+    entries.truncate(expected);
+    Ok(entries)
 }
 
 async fn begin_calendar_frame_pick(index: usize) {
@@ -4768,9 +4739,7 @@ fn build_main_ui(state: UiSnapshot) -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .flex_grow(1.0)
         .gap(2)
-        .child(
-            heading("资源包工作台", 18, "1"),
-        )
+        .child(heading("资源包工作台", 18, "1"))
         .child(
             span(
                 &format!(
@@ -4854,18 +4823,13 @@ fn build_main_ui(state: UiSnapshot) -> ui::Element {
                 if selected { "accent" } else { "gray" },
             )
             .prop("role", "tab")
-            .prop(
-                "aria-selected",
-                if selected { "true" } else { "false" },
-            )
+            .prop("aria-selected", if selected { "true" } else { "false" })
             .disabled_if(state.busy_blocks_navigation),
         );
     }
     // Status sits directly under the controls that trigger it, not at the very
     // bottom of a long scrolling page.
-    root = root
-        .child(navigation)
-        .child(build_status(&state));
+    root = root.child(navigation).child(build_status(&state));
     match state.workbench_tab {
         WorkbenchTab::Resources => {
             // Single column: put the inspector directly after the browser so a
@@ -6177,11 +6141,16 @@ fn build_browser(state: &UiSnapshot) -> ui::Element {
         .align_center()
         .gap(6)
         .child(search)
-        .child(button("筛选", "browser.apply-search", "soft", "gray").disabled_if(state.busy_blocks_navigation));
+        .child(
+            button("筛选", "browser.apply-search", "soft", "gray")
+                .disabled_if(state.busy_blocks_navigation),
+        );
 
     if !state.search_query.trim().is_empty() {
-        search_row = search_row
-            .child(button("清空", "browser.clear-search", "ghost", "gray").disabled_if(state.busy_blocks_navigation));
+        search_row = search_row.child(
+            button("清空", "browser.clear-search", "ghost", "gray")
+                .disabled_if(state.busy_blocks_navigation),
+        );
     }
 
     let mut list = ui::Element::new(ui::ElementType::ScrollArea, None)
@@ -6317,7 +6286,10 @@ fn build_breadcrumbs(state: &UiSnapshot) -> ui::Element {
                     .gap(6)
                     .flex_grow(1.0)
                     .child(span("全部已修改资源", 13))
-                    .child(badge(&format!("{} 项", state.firmware_replacement_count), "gray")),
+                    .child(badge(
+                        &format!("{} 项", state.firmware_replacement_count),
+                        "gray",
+                    )),
             )
             .child(
                 button("返回目录浏览", "browser.filter:all", "ghost", "gray")
@@ -6437,7 +6409,11 @@ fn build_directory_row(entry: &BrowserEntry, busy: bool) -> ui::Element {
         .flex_shrink(0.0);
 
     if entry.has_replacements {
-        right = right.child(span("●", 12).text_color("gray").prop("title", "含已修改资源"));
+        right = right.child(
+            span("●", 12)
+                .text_color("gray")
+                .prop("title", "含已修改资源"),
+        );
     }
     if entry.child_count > 0 {
         right = right.child(span(&format!("{} 项", entry.child_count), 12));
@@ -6750,7 +6726,10 @@ fn build_metadata(state: &UiSnapshot) -> ui::Element {
             &state.version_code,
             "pack.version_code",
             "1",
-            state.field_errors.get("pack.version_code").map(String::as_str),
+            state
+                .field_errors
+                .get("pack.version_code")
+                .map(String::as_str),
         ))
         .child(field("作者（可选）", &state.author, "pack.author", ""))
         .child(field(
@@ -6868,12 +6847,7 @@ fn validate_field(event_id: &str, value: &str) -> Result<(), String> {
 ///
 /// The host exposes no <label> element, so the accessible name is set on the
 /// checkbox itself; otherwise a screen reader announces an unnamed control.
-fn checkbox_row(
-    label: &str,
-    handler: &str,
-    checked: bool,
-    busy: bool,
-) -> ui::Element {
+fn checkbox_row(label: &str, handler: &str, checked: bool, busy: bool) -> ui::Element {
     ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
@@ -6925,11 +6899,7 @@ fn field_with_error(
         .child(text(label, 12))
         .child(input);
     if let Some(error) = error {
-        container = container.child(
-            text(error, 12)
-                .text_color("red")
-                .prop("role", "alert"),
-        );
+        container = container.child(text(error, 12).text_color("red").prop("role", "alert"));
     }
     container
 }
@@ -7134,24 +7104,34 @@ mod tests {
             commit_calendar_sequence(&mut state, tab, inputs).unwrap();
             let before = state.replacements.clone();
             let item = state.calendar.current_item().clone();
-            let mut cases = vec![entries[..count - 1].to_vec()];
-            for name in [
-                "../01.bin",
-                "images/01.png",
-                "images/readme.txt",
-                "other/01.bin",
-                "images/1.bin",
-                "images/00.bin",
-            ] {
-                let mut bad = entries.clone();
-                bad[0].0 = name.into();
-                cases.push(bad);
-            }
-            for bad in cases {
-                assert!(parse_calendar_sequence_zip(tab, &sequence_zip(bad)).is_err());
-                assert_eq!(state.replacements, before);
-                assert_eq!(state.calendar.current_item(), &item);
-            }
+            let partial =
+                parse_calendar_sequence_zip(tab, &sequence_zip(entries[..count - 1].to_vec()))
+                    .unwrap();
+            assert_eq!(partial.len(), count - 1);
+            let mixed = sequence_zip(vec![
+                ("other/z.BIN".into(), calendar_bin()),
+                ("images/a.png".into(), vec![1]),
+                ("__MACOSX/._a.png".into(), vec![0]),
+                ("images/.DS_Store".into(), vec![0]),
+                ("readme.txt".into(), vec![0]),
+            ]);
+            let parsed = parse_calendar_sequence_zip(tab, &mixed).unwrap();
+            assert_eq!(
+                parsed
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["images/a.png", "other/z.BIN"]
+            );
+            let excess = sequence_zip(
+                (0..count + 2)
+                    .map(|i| (format!("{i:02}.bin"), calendar_bin()))
+                    .collect(),
+            );
+            assert_eq!(
+                parse_calendar_sequence_zip(tab, &excess).unwrap().len(),
+                count
+            );
             let mut invalid = entries.clone();
             invalid[0].1 = b"invalid image".to_vec();
             let parsed = parse_calendar_sequence_zip(tab, &sequence_zip(invalid)).unwrap();
@@ -7854,18 +7834,30 @@ mod tests {
         let mut env = host_env().lock().unwrap();
         let saved = *env;
 
-        *env = HostEnv { width: 1200, height: 300, dark: true };
+        *env = HostEnv {
+            width: 1200,
+            height: 300,
+            dark: true,
+        };
         drop(env);
         let small = list_height(1.0);
         let mut env = host_env().lock().unwrap();
-        *env = HostEnv { width: 1200, height: 1200, dark: true };
+        *env = HostEnv {
+            width: 1200,
+            height: 1200,
+            dark: true,
+        };
         drop(env);
         let large = list_height(1.0);
         assert!(large > small, "taller viewport should yield taller list");
 
         // A preview frame never grows past the viewport.
         let mut env = host_env().lock().unwrap();
-        *env = HostEnv { width: 400, height: 300, dark: true };
+        *env = HostEnv {
+            width: 400,
+            height: 300,
+            dark: true,
+        };
         drop(env);
         assert!(preview_height(320) <= 300);
         assert!(preview_height(320) >= 120);
