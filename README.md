@@ -19,6 +19,8 @@ CRPack export follows `../Canopus-Module-Resource-Hook/docs/interconnect_proto.m
 
 The initial target is Xiaomi Band 11 firmware `4.100.155`; `targets` is inferred from the selected firmware filename when possible and remains editable. The importer streams the ROMFS tree into metadata and reads original file bytes lazily; it does not keep a full expanded ROMFS in memory. AstroBox's file-picker still passes the complete compressed archive to the WASM plugin. For deflated ROMFS entries, loading a selected file may need to inflate the stream up to that file's offset, trading latency for lower memory use. Actual imports remain subject to available host memory.
 
+Redmi Watch 6 standard edition (P65) firmware `3.100.043` is identified from the exact `miwear.watch.p65_v3.100.043` OTA filename. It uses the existing ROMFS importer and LVGL v9 template conversion. Keep the original resource dimensions, stride and compression method; the RW6 runtime profile currently supports static `/resource/app/` icon mappings. Calendar launcher aliases include `launcher/cal_launcher128.bin` and `calendar/cal_launcher160.bin`. Device runtime support is supplied separately by Canopus and Corona; firmware import alone does not establish installation compatibility.
+
 ## Native CLI: one icon theme, multiple firmwares
 
 The CLI separates shared source assets in `theme.json` from per-firmware resource bindings in `targets/*.json`. Each target pins the SHA-256 of its complete firmware (no per-resource hashes) and uses that firmware's original image templates. Builds produce one `.crpack` per target; no model service or AstroBox host is required.

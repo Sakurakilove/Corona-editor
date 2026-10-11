@@ -2823,7 +2823,11 @@ fn preview_from_bytes(bytes: &[u8]) -> (Option<String>, Option<String>) {
 
 fn infer_target(file_name: &str) -> String {
     let name = file_name.to_ascii_lowercase();
-    if name.contains("4.100.155") {
+    if name.contains("miwear.watch.p65_v3.100.043_")
+        || name.ends_with("miwear.watch.p65_v3.100.043.bin")
+    {
+        "xiaomi-p65-3.100.043".into()
+    } else if name.contains("4.100.155") {
         "xiaomi-band-11-4.100.155".into()
     } else if name.contains("4.100.139") {
         "xiaomi-band-11-4.100.139".into()
@@ -4228,6 +4232,13 @@ impl DisabledElement for ui::Element {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redmi_watch6_target_inference_requires_model_and_exact_version() {
+        assert_eq!(infer_target("miwear.watch.p65_v3.100.043_full_662aa7db.bin"), "xiaomi-p65-3.100.043");
+        assert_eq!(infer_target("miwear.watch.p65_v3.100.043.bin"), "xiaomi-p65-3.100.043");
+        assert_eq!(infer_target("miwear.watch.p67_v3.100.043_full.bin"), "");
+        assert_eq!(infer_target("miwear.watch.p65_v3.100.044_full.bin"), "");
+    }
     use super::*;
 
     fn test_firmware(contents: &[u8]) -> FirmwareIndex {

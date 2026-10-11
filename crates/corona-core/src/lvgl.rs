@@ -441,6 +441,10 @@ fn validate_rle_payload(data: &[u8], info: ImageInfo) -> Result<(), String> {
     if expanded < expected || expanded > 64 * 1024 * 1024 {
         return Err("RLE expanded payload does not match bounded image dimensions".into());
     }
+    let method = u32::from_le_bytes(data[12..16].try_into().unwrap());
+    if method != 1 {
+        return Err("unsupported LVGL9 compression method; expected RLE method 1".into());
+    }
     Ok(())
 }
 
@@ -1735,6 +1739,23 @@ mod tests {
                 .unwrap_err()
                 .contains("truncated")
         );
+    }
+
+    #[test]
+    fn rle_header_does_not_accept_another_compression_method() {
+        let original = sample_template();
+        let payload = &original[12..];
+        let compressed = rle_compress(payload);
+        let mut template = original[..12].to_vec();
+        template[2] = 8;
+        template.extend_from_slice(&2u32.to_le_bytes());
+        template.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        template.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        template.extend_from_slice(&compressed);
+        assert!(decode_to_rgba(&template).unwrap_err().contains("compression method"));
+        let png = png_bytes(RgbaImage::new(2, 2));
+        assert!(encode_png_to_template(&png, &template, false)
+            .unwrap_err().contains("compression method"));
     }
 
     #[test]
